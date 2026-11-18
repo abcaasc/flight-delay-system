@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+instance/
+
+# 完整数仓与原始落地数据不入库，只保留演示数仓与模型产物
+data/*
+!data/demo/
+!data/models/

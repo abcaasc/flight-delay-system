@@ -1,0 +1,37 @@
+# ---------- 依赖与虚拟环境 ----------
+backend/.venv/
+frontend/node_modules/
+
+# ---------- Python 运行期产物 ----------
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+backend/instance/
+*.log
+
+# ---------- 前端构建产物 ----------
+frontend/dist/
+frontend/.build-temp/
+frontend/test-results/
+frontend/playwright-report/
+frontend/*.tsbuildinfo
+
+# ---------- 本地配置与密钥（绝不入库） ----------
+backend/.env
+frontend/.env.local
+.env
+
+# ---------- 数据 ----------
+# 完整数仓约 12 GB、原始数据集约 10 GB，只在本地保留，不进仓库。
+backend/data/warehouse/
+backend/data/staging/
+# 公网演示用的瘦身数仓（约 30 MB）与模型产物要随仓库发布。
+!backend/data/demo/
+!backend/data/models/
+
+# ---------- 系统杂项 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+pip-*
+fds-test-*

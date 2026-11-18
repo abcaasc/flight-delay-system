@@ -1,0 +1,12 @@
+{
+  "bias": -4.313195,
+  "threshold": 0.18,
+  "trained_on": [
+    "2015-01"
+  ],
+  "base_rate": 0.235,
+  "task": "cls15",
+  "algo": "lightgbm",
+  "model_ver": "lightgbm_cls15_20261117_165551",
+  "valid_f1_at_threshold": 0.4428
+}

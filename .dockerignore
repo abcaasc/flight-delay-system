@@ -1,0 +1,30 @@
+# 构建上下文排除项：只把构建需要的东西送进 Docker
+.git
+.gitignore
+**/.venv
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+**/*.py[cod]
+
+# 前端：Dist 由 Dockerfile 内重新构建，源码要进去
+frontend/dist
+frontend/.build-temp
+frontend/test-results
+frontend/playwright-report
+frontend/.env.local
+
+# 数据：完整数仓/原始数据 10+ GB，绝不进镜像；演示数仓与模型产物要进
+backend/data/warehouse
+backend/data/staging
+backend/data/source
+backend/instance
+backend/.env
+backend/docs
+backend/tests
+backend/requirements-model.txt
+
+# 文档与截图
+docs
+*.md
+!backend/README.md

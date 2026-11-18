@@ -1,0 +1,4 @@
+# 在 requirements.txt 的基础上安装真实 LightGBM 训练依赖。
+-r requirements.txt
+lightgbm==4.5.0
+scikit-learn==1.5.2
