@@ -7,7 +7,7 @@
 加工成一套「可预测、可解释、可下钻」的航班运行态势系统：**数据接入 → 四层数仓 → 指标服务 → REST 接口 → Vue 可视化看板**。
 
 **代码仓库**：<https://github.com/abcaasc/flight-delay-system>　·　**在线演示**：见 [DEPLOY.md](DEPLOY.md) 第 2 节（已内置 `render.yaml`，可在 Render 上蓝图一键部署）
-**演示账号**：`admin / admin123`（只读浏览全部分析页无需登录）
+**访问方式**：公开分析页无需登录；本地初始化演示账号后，可用 `admin / admin123` 体验数据管理。
 
 ---
 

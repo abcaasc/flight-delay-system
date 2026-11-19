@@ -55,6 +55,6 @@ EXPOSE 7860
 
 # 说明：生产环境 run.py 走 waitress（多线程 WSGI），不启用 Flask 调试器。
 # 启动时：① 没给 SECRET_KEY 就随机生成（重启后旧 token 失效，演示场景无影响）
-#        ② 幂等地灌一次演示账号（失败不影响主服务）
+#        ② 仅在本地显式设置 SEED_DEMO_USERS=1 时初始化演示账号
 #        ③ 起服务
-CMD ["sh", "-c", "export SECRET_KEY=\"${SECRET_KEY:-$(python -c 'import secrets;print(secrets.token_hex(32))')}\"; python -m flask --app run.py seed-users || echo '[warn] 演示账号初始化跳过'; exec python run.py"]
+CMD ["sh", "-c", "export SECRET_KEY=\"${SECRET_KEY:-$(python -c 'import secrets;print(secrets.token_hex(32))')}\"; if [ \"${SEED_DEMO_USERS:-0}\" = 1 ]; then python -m flask --app run.py seed-users || echo '[warn] 演示账号初始化跳过'; fi; exec python run.py"]

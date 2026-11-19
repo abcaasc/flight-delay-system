@@ -12,11 +12,14 @@ services:
     runtime: docker
     plan: free
     region: singapore
+    branch: main
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /api/v1/system/health
-    autoDeploy: true
+    autoDeployTrigger: commit
     envVars:
+      - key: SECRET_KEY
+        generateValue: true
       - key: FLASK_ENV
         value: prod
       - key: QUERY_ENGINE
