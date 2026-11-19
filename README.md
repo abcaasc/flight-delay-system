@@ -9,6 +9,8 @@
 **代码仓库**：<https://github.com/abcaasc/flight-delay-system>　·　**在线演示**：见 [DEPLOY.md](DEPLOY.md) 第 2 节（已内置 `render.yaml`，可在 Render 上蓝图一键部署）
 **访问方式**：公开分析页无需登录；本地初始化演示账号后，可用 `admin / admin123` 体验数据管理。
 
+第一次使用可打开[航迹使用指南](USER_GUIDE.md)，按页面操作查看航班、延误原因和预测结果。
+
 ---
 
 ## 一、功能一览
