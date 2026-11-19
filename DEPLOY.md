@@ -17,7 +17,11 @@
 
 ---
 
-## 1. 推送到 GitHub
+## 1. 推送到 GitHub（✅ 已完成）
+
+**仓库已建好并推送**：<https://github.com/abcaasc/flight-delay-system>（`main` 分支，提交 `db46acb`，仓库体积约 26 MB）。
+
+下面的 1.1~1.3 是原始步骤，换机器 / 重建仓库 / 换账号时照做即可。
 
 ### 1.1 网页上新建仓库
 
@@ -69,27 +73,29 @@ git ls-files | Select-String "\.env$|warehouse/|node_modules|\.venv"   # 应该�
 
 免费档：512 MB 内存 / 0.1 CPU / **15 分钟无访问自动休眠**，下次访问约 30–60 秒冷启动。演示够用。
 
-1. 打开 https://render.com → 用 **GitHub 账号登录**（Sign in with GitHub）
-2. 右上角 **New +** → **Web Service**
-3. 选择仓库 `flight-delay-system` → **Connect**
-4. 填写部署参数：
+仓库根目录已经有 `render.yaml`，所以**不用手填任何部署参数**：
 
-   | 字段 | 值 |
-   | --- | --- |
-   | Name | `flight-delay-system` |
-   | Language / Runtime | **Docker** |
-   | Branch | `main` |
-   | Instance Type | **Free** |
-   | Health Check Path | `/api/v1/system/health` |
-
-5. 点 **Create Web Service**，等 3–6 分钟（要装 Node 构建前端 + pip 装依赖）
-6. 日志出现 `Listening at: http://0.0.0.0:7860` 之类的行即成功，页面顶部会给出地址：
-   `https://flight-delay-system-xxxx.onrender.com`
+1. 打开 https://render.com → **Sign in with GitHub**（授权时选 `Only select repositories`，只勾这个仓库）
+2. 右上角 **New +** → **Blueprint** → 选 `abcaasc/flight-delay-system` → **Connect**
+3. 识别到 `render.yaml` 后点 **Apply**，等 5–8 分钟（云端要装 Node 构建前端 + pip 装依赖）
+4. 顶部出现的地址就是公网演示地址：`https://flight-delay-system-xxxx.onrender.com`
 
 **以后更新代码只需 `git push`**，Render 会自动重新构建部署。
 
+<details>
+<summary>不想用 Blueprint 的话，也可以手动建 Web Service</summary>
+
+| 字段 | 值 |
+| --- | --- |
+| Language / Runtime | **Docker** |
+| Branch | `main` |
+| Instance Type | **Free** |
+| Health Check Path | `/api/v1/system/health` |
+
+</details>
+
 > 免费档的坑：示例数据由 `backend/data/demo/warehouse` 提供，镜像内已经带好，不依赖任何外部存储。
-> 若 512 MB 内存不够（日志出现 `Killed`），把 `Dockerfile` 里的 `--threads=8` 调小，或在 Render 升到付费档。
+> 若 512 MB 内存不够（日志出现 `Killed`），把 `Dockerfile` 里的 `--threads=8` 调小，或改用下面的方案 B。
 
 ### 方案 B：Hugging Face Spaces（免费 16 GB 内存，休眠更慢）
 

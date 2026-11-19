@@ -39,6 +39,7 @@ import {
 import { motion, useReducedMotion } from "motion-v";
 import Card from "./components/Card.vue";
 const FlightSearch = defineAsyncComponent(() => import("./components/FlightSearch.vue"));
+const DelayReasons = defineAsyncComponent(() => import("./components/DelayReasons.vue"));
 const DataManagement = defineAsyncComponent(() => import("./components/DataManagement.vue"));
 import { airportName, airportNames } from "./lib/airports";
 const PredictionWorkspace = defineAsyncComponent(
@@ -76,7 +77,7 @@ const nav = [
   {
     name: "多维分析",
     icon: ChartNoAxesCombined,
-    description: "对比每日运行波动与机场表现，定位延误集中区间。",
+    description: "查看到港延误原因，对比每日运行波动与机场表现。",
   },
   {
     name: "航班查询",
@@ -627,6 +628,7 @@ async function toggleFullscreen() {
                 </div></template
               >
             </Card>
+            <DelayReasons v-if="page === '多维分析'" :month="month" :airport="airport" :demo="mode === 'demo'" />
             <Card
               class="ranking"
               title="机场延误排行"

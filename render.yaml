@@ -1,0 +1,27 @@
+# ============================================================
+#  Render Blueprint：在 Render 上一键创建公网演示环境
+#  ------------------------------------------------------------
+#  用法：Render 控制台 → New + → Blueprint → 选本仓库 → Apply
+#  免费档说明：512MB 内存、闲置 15 分钟自动休眠，
+#              再次访问时冷启动约 30~60 秒（演示前先点开预热即可）。
+#  健康检查：/api/v1/system/health
+# ============================================================
+services:
+  - type: web
+    name: flight-delay-system
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/v1/system/health
+    autoDeploy: true
+    envVars:
+      - key: FLASK_ENV
+        value: prod
+      - key: QUERY_ENGINE
+        value: pandas
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # 注意：不要在这里写 PORT —— Render 会注入自己的 PORT，
+      # 应用按 $PORT 监听才能被平台探测到（Dockerfile 里的 7860 只是本地默认值）。

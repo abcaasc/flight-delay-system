@@ -36,9 +36,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# libgomp1：LightGBM 的 OpenMP 运行时，slim 镜像里没有，
+# 缺了会让 `import lightgbm` 抛 OSError: libgomp.so.1 并静默降级成基线模型
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # 依赖单独一层，改代码不必重装依赖
-COPY backend/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# requirements-demo.txt = requirements.txt + lightgbm/scikit-learn，
+# 这样容器里跑的是训练好的 LightGBM 模型，而不是降级基线
+COPY backend/requirements.txt backend/requirements-demo.txt ./
+RUN pip install --no-cache-dir -r requirements-demo.txt
 
 COPY backend/ ./
 COPY --from=frontend /web/dist /web

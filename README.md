@@ -6,7 +6,8 @@
 把 120 个月、约 6300 万条美国国内航班流水（BTS）+ 1142 个气象站点（NOAA ISD）+ 机场航线维表，
 加工成一套「可预测、可解释、可下钻」的航班运行态势系统：**数据接入 → 四层数仓 → 指标服务 → REST 接口 → Vue 可视化看板**。
 
-**在线演示**：部署完成后填写（见 [DEPLOY.md](DEPLOY.md)）　·　**演示账号**：`admin / admin123`（只读浏览无需登录）
+**代码仓库**：<https://github.com/abcaasc/flight-delay-system>　·　**在线演示**：见 [DEPLOY.md](DEPLOY.md) 第 2 节（已内置 `render.yaml`，可在 Render 上蓝图一键部署）
+**演示账号**：`admin / admin123`（只读浏览全部分析页无需登录）
 
 ---
 
@@ -174,7 +175,16 @@ curl -X POST http://127.0.0.1:7860/api/v1/predict \
 
 ## 八、部署到公网
 
-完整步骤（创建 GitHub 仓库、推送代码、Render / Hugging Face Spaces / 自有服务器三选一）见 **[DEPLOY.md](DEPLOY.md)**。
+已有仓库：<https://github.com/abcaasc/flight-delay-system>
+
+最省事的一条路（约 3 分钟，无需服务器）：
+
+1. 打开 <https://render.com>，用 GitHub 账号登录；
+2. **New + → Blueprint** → 选 `abcaasc/flight-delay-system` → **Apply**（`render.yaml` 已写好，无需手填任何配置）；
+3. 等首次构建完成（约 5~8 分钟），得到形如 `https://flight-delay-system-xxxx.onrender.com` 的地址。
+
+免费档 512 MB 内存、闲置 15 分钟休眠，答辩前先访问一次预热（冷启动约 30~60 秒）即可。
+Hugging Face Spaces（16 GB 内存、不休眠更久）与自有服务器的步骤见 **[DEPLOY.md](DEPLOY.md)**。
 
 ---
 

@@ -82,4 +82,5 @@ def export():
 @bp.get("/<flight_sk>")
 @optional_auth
 def detail(flight_sk: str):
-    return ok(stats.flight_detail(flight_sk))
+    flight_date = params.get_date("flight_date")
+    return ok(stats.flight_detail(flight_sk, flight_date.isoformat() if flight_date else None))

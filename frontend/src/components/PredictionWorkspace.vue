@@ -9,10 +9,18 @@ import { apiRequest, percent, type DataSource } from "../lib/dashboard";
 const props = defineProps<{ mode: DataSource; initialMonth: string; initialAirport: string }>();
 defineEmits<{ useWarehouse: []; inspectValidation: [] }>();
 
+interface RiskFactor {
+  feature: string;
+  name_cn: string;
+  feature_value?: number | null;
+  contribution_logit?: number;
+  impact_pp: number;
+}
+
 interface PredictionResult {
   flight: { origin: string; dest: string; airline: string; flight_date: string; crs_dep_time: string };
   prediction: { prob_delay: number; risk_level: "low" | "medium" | "high"; threshold: number };
-  explanation: { factors: { feature: string; name_cn: string; impact_pp: number }[] };
+  explanation: { factors: RiskFactor[] };
   model_ver: string;
   engine: string;
   meta: { weather_source: string; rate_source_period: string | null };
@@ -25,6 +33,37 @@ const weatherLabels: Record<string, string> = {
   climatology: "历史气候估计，缺测时取默认值",
   default: "缺少观测，采用默认值",
 };
+const inputUnits: Record<string, string> = {
+  distance_mi: "英里",
+  vis_min_mi: "英里",
+  wind_max_ms: "m/s",
+  tmp_mean_c: "℃",
+  precip_mm: "mm",
+  crs_elapsed_min: "分钟",
+  prev_arr_delay_min: "分钟",
+  turnaround_min: "分钟",
+  origin_traffic_prev_day: "班",
+  dep_hour: "时",
+  month: "月",
+};
+const binaryInputs = new Set(["is_weekend", "is_holiday", "chain_available", "risk_flag", "weather_available"]);
+const weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"];
+function formatModelInput({ feature, feature_value: value }: RiskFactor) {
+  if (value == null) return "缺失";
+  if (feature.includes("_delay_rate_")) return percent(value) + "%";
+  if (feature === "day_of_week" && weekdays[value]) return weekdays[value];
+  if (binaryInputs.has(feature)) return value === 1 ? "是" : "否";
+  const display = value.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
+  const unit = inputUnits[feature];
+  return unit ? `${display} ${unit}` : display;
+}
+function formatImpact(factor: RiskFactor) {
+  const effect = factor.contribution_logit || factor.impact_pp;
+  if (effect === 0) return "影响接近零";
+  const direction = effect > 0 ? "推高风险" : "拉低风险";
+  const magnitude = Math.abs(factor.impact_pp);
+  return `${direction} · 约 ${magnitude ? magnitude.toFixed(2) : "<0.01"} 个百分点`;
+}
 const origin = props.initialAirport || "ORD";
 const plan = reactive({
   origin, dest: origin === "LAX" ? "ORD" : "LAX", airline: "AA",
@@ -143,19 +182,22 @@ async function predict() {
             <span class="risk-band" :class="{ elevated: result.prediction.risk_level !== 'low' }">{{ riskLabels[result.prediction.risk_level] }}</span>
           </div>
           <p class="form-note">模型判定延误的概率阈值为 {{ percent(result.prediction.threshold) }}%。</p>
-          <h3>主要影响因素</h3>
+          <h3>影响模型预测的因素</h3>
           <ul class="factor-list">
             <li v-for="factor in result.explanation.factors" :key="factor.feature">
-              <span>{{ factor.name_cn }}</span>
-              <b>{{ factor.impact_pp > 0 ? "+" : "" }}{{ factor.impact_pp.toFixed(2) }} 个百分点</b>
+              <div>
+                <span>{{ factor.name_cn }}</span>
+                <small>模型输入 {{ formatModelInput(factor) }}</small>
+              </div>
+              <b>{{ formatImpact(factor) }}</b>
             </li>
           </ul>
-          <p class="form-note">数值为各因素对概率的近似影响。单航班输入缺少前序航班信息，相关因素反映模型对缺失值的处理。</p>
+          <p class="form-note">气象输入 · {{ weatherLabels[result.meta.weather_source] || result.meta.weather_source }}</p>
+          <p class="form-note">百分点表示模型对输入的近似响应。单航班输入缺少前序飞机信息，相关贡献来自模型对缺失值的处理。</p>
           <details class="model-details">
             <summary>模型与输入来源</summary>
             <dl>
               <dt>模型版本</dt><dd>{{ result.model_ver }}</dd>
-              <dt>气象输入</dt><dd>{{ weatherLabels[result.meta.weather_source] || result.meta.weather_source }}</dd>
               <dt>近期延误率</dt><dd>{{ result.meta.rate_source_period ? "起飞日前七日的历史记录" : "缺少近期记录，采用回退值" }}</dd>
             </dl>
           </details>
@@ -192,8 +234,9 @@ async function predict() {
 .risk-band.elevated { background: #f7efdf; color: #805821; }
 .risk-result h3 { margin: 20px 0 4px; font-size: 15px; }
 .factor-list { list-style: none; margin: 0 0 8px; padding: 0; }
-.factor-list li { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }
-.factor-list b { white-space: nowrap; font-weight: 550; }
+.factor-list li { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.factor-list small { display: block; margin-top: 3px; color: var(--muted); }
+.factor-list b { font-size: 13px; font-weight: 550; }
 .model-details { margin-top: 14px; font-size: 13px; }
 .model-details summary { cursor: pointer; color: var(--primary); }
 .model-details dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; }

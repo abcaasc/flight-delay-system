@@ -66,7 +66,9 @@ def overview_distribution():
 @optional_auth
 @cache_headers(600)
 def overview_reasons():
-    return ok(stats.delay_reasons(params.get_str("date_from"), params.get_str("date_to")))
+    args = _scope_args()
+    return ok(stats.delay_reasons(args["date_from"], args["date_to"],
+                                  tuple(args["airports"]), tuple(args["airlines"])))
 
 
 # ---------------------------------------------------------------- P2 网络

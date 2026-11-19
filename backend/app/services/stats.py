@@ -273,33 +273,77 @@ def delay_distribution(date_from: str | None = None, date_to: str | None = None,
     }
 
 
+BTS_DELAY_REASON_LABELS = {
+    "carrier_delay": "承运人",
+    "weather_delay": "极端天气",
+    "nas_delay": "航空运行系统（NAS）",
+    "security_delay": "安保",
+    "late_aircraft_delay": "前序飞机晚到",
+}
+BTS_FLIGHT_KEY = ("flight_date", "reporting_airline", "flight_number", "origin")
+BTS_ARRIVAL_STATUS = ("arr_del15", "cancelled", "diverted")
+BTS_ARRIVAL_DELAY_THRESHOLD_MIN = 15
+
+
+def _bts_arrival_delayed(df: pd.DataFrame) -> pd.Series:
+    status = df.reindex(columns=BTS_ARRIVAL_STATUS).apply(pd.to_numeric, errors="coerce")
+    return status["arr_del15"].eq(1) & status["cancelled"].eq(0) & status["diverted"].eq(0)
+
+
+def _bts_reason_minutes(df: pd.DataFrame) -> pd.DataFrame:
+    minutes = df.reindex(columns=Config.DELAY_REASON_COLUMNS).apply(pd.to_numeric, errors="coerce")
+    return minutes.where(minutes.gt(0) & np.isfinite(minutes))
+
+
 @json_cached("overview")
-def delay_reasons(date_from: str | None = None, date_to: str | None = None) -> dict:
-    """延误原因分解统计（仅展示/归因参考，禁止作为模型特征 —— R-05）。"""
+def delay_reasons(date_from: str | None = None, date_to: str | None = None,
+                  airports: tuple[str, ...] = (), airlines: tuple[str, ...] = ()) -> dict:
+    """汇总 BTS 上报的到港延误原因分钟。"""
     start, end = period_range(date_from, date_to)
-    months = _months_between(start, end)[-1:]
-    df = _read_periods("ods_bts_flight", months,
-                       columns=["carrier_delay", "weather_delay", "nas_delay",
-                                "security_delay", "late_aircraft_delay"])
-    if df.empty:
-        raise ApiError(ErrCode.DATA_NOT_READY, "ODS 层无数据")
-    out = []
-    total = 0.0
-    for col, label in (("carrier_delay", "承运人"), ("weather_delay", "天气"),
-                       ("nas_delay", "空管/流量"), ("security_delay", "安保"),
-                       ("late_aircraft_delay", "前序航班晚到")):
-        series = pd.to_numeric(df[col], errors="coerce")
-        value = float(series.fillna(0).sum())
-        total += value
-        out.append({"key": col, "label": label, "minutes": round(value, 1),
-                    "flights": int(series.notna().sum())})
-    for item in out:
-        item["share"] = round(item["minutes"] / total, 4) if total else None
+    months = _months_between(start, end)
+    missing = sorted(set(months) - set(engine.BaseEngine.available_periods("ods_bts_flight")))
+    if missing:
+        raise ApiError(ErrCode.DATA_NOT_READY, f"当前数仓缺少以下月份的 BTS 原始数据：{', '.join(missing)}")
+
+    columns = [*BTS_FLIGHT_KEY, *BTS_ARRIVAL_STATUS, *Config.DELAY_REASON_COLUMNS]
+    filters = [("flight_date", ">=", start), ("flight_date", "<=", end)]
+    if airports:
+        filters.append(("origin", "in", airports))
+    if airlines:
+        filters.append(("reporting_airline", "in", airlines))
+    minutes_by_reason = dict.fromkeys(Config.DELAY_REASON_COLUMNS, 0.0)
+    flights_by_reason = dict.fromkeys(Config.DELAY_REASON_COLUMNS, 0)
+    arrival_delayed = reported = 0
+    for month in months:
+        df = engine.read("ods_bts_flight", columns=columns,
+                         filters=[("year_month", "=", month), *filters])
+        if df.empty:
+            continue
+        df = df.drop_duplicates(subset=list(BTS_FLIGHT_KEY))
+        eligible = df.loc[_bts_arrival_delayed(df)]
+        minutes = _bts_reason_minutes(eligible)
+        arrival_delayed += len(eligible)
+        reported += int(minutes.notna().any(axis=1).sum())
+        for key in Config.DELAY_REASON_COLUMNS:
+            minutes_by_reason[key] += float(minutes[key].sum())
+            flights_by_reason[key] += int(minutes[key].count())
+    total = sum(minutes_by_reason.values())
+    items = [
+        {"key": key, "label": BTS_DELAY_REASON_LABELS[key],
+         "minutes": round(value, 1), "flights": flights_by_reason[key],
+         "share": round(value / total, 4) if total else None}
+        for key, value in minutes_by_reason.items()
+    ]
     return {
-        "period": months[0] if months else None,
-        "items": out,
+        "period": months[-1],
+        "date_from": start,
+        "date_to": end,
+        "items": items,
+        "arrival_delayed_flights": arrival_delayed,
+        "reported_flights": reported,
         "total_minutes": round(total, 1),
-        "note": "原因分解字段只对已延误航班有值，属延误结果的事后拆解，已列入特征黑名单（R-05）",
+        "threshold_min": BTS_ARRIVAL_DELAY_THRESHOLD_MIN,
+        "note": "占比按 BTS 已上报的原因分钟计算。同一航班可以有多项原因。",
     }
 
 
@@ -675,16 +719,56 @@ def flights_query(date_from: str | None = None, date_to: str | None = None,
     }
 
 
-def flight_detail(flight_sk: str) -> dict:
+def _flight_bts_reasons(flight: dict, month: str) -> dict:
+    result = {"status": "not_reported", "items": []}
+    arrival_delay = flight.get("arr_delay_min")
+    if (flight.get("cancelled") == 1 or flight.get("diverted") == 1
+            or flight.get("arr_del15") == 0
+            or (arrival_delay is not None and arrival_delay < BTS_ARRIVAL_DELAY_THRESHOLD_MIN)):
+        return {**result, "status": "not_applicable"}
+    fields = (*BTS_FLIGHT_KEY, "dest")
+    if (any(not flight.get(field) for field in fields)
+            or month not in engine.BaseEngine.available_periods("ods_bts_flight")):
+        return {**result, "status": "source_unavailable"}
+    filters = [("year_month", "=", month), *((field, "=", flight[field]) for field in fields)]
+    try:
+        raw = engine.read("ods_bts_flight", columns=[*BTS_ARRIVAL_STATUS, *Config.DELAY_REASON_COLUMNS],
+                          filters=filters, limit=1)
+    except ApiError as exc:
+        if exc.code != ErrCode.DATA_NOT_READY:
+            raise
+        return {**result, "status": "source_unavailable"}
+    if raw.empty:
+        return {**result, "status": "source_unavailable"}
+    eligible = raw.loc[_bts_arrival_delayed(raw)]
+    if eligible.empty:
+        return result
+    minutes = _bts_reason_minutes(eligible).iloc[0].dropna().sort_values(ascending=False, kind="stable")
+    if minutes.empty:
+        return result
+    return {
+        "status": "reported",
+        "items": [{"key": key, "label": BTS_DELAY_REASON_LABELS[key], "minutes": float(value)}
+                  for key, value in minutes.items()],
+    }
+
+
+def flight_detail(flight_sk: str, flight_date: str | None = None) -> dict:
     months = engine.BaseEngine.available_periods("dwd_flight_detail")
+    if flight_date:
+        months = [month for month in months if month == flight_date[:7]]
+    filters = [("flight_sk", "=", flight_sk)]
+    if flight_date:
+        filters.append(("flight_date", "=", flight_date))
     for month in reversed(months):
-        df = engine.read("dwd_flight_detail", filters=[("year_month", "=", month),
-                                                       ("flight_sk", "=", flight_sk)], limit=1)
+        df = engine.read("dwd_flight_detail", filters=[("year_month", "=", month), *filters], limit=1)
         if df.empty:
             continue
         hit = df[df["flight_sk"].astype(str) == flight_sk]
         if not hit.empty:
-            return engine.to_records(hit)[0]
+            flight = engine.to_records(hit)[0]
+            flight["arrival_delay_reasons"] = _flight_bts_reasons(flight, month)
+            return flight
     raise ApiError(ErrCode.NOT_FOUND, f"未找到航班：{flight_sk}")
 
 

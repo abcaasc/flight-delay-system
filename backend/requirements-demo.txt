@@ -1,0 +1,15 @@
+# ============================================================
+# 演示容器专用依赖：在 requirements.txt 基础上装上建模库
+# ------------------------------------------------------------
+# requirements.txt 把 lightgbm / scikit-learn 标为「可选」，
+# 缺失时后端会降级成内置可解释基线模型（预测仍可用，但不是论文里
+# 训练出来的那套 LightGBM）。公网演示要展示真实模型，所以单独
+# 抽一个清单给 Dockerfile 用，本地纯 API 开发仍可只装 requirements.txt。
+# ============================================================
+-r requirements.txt
+
+# --- 建模：加载 backend/data/models/*.pkl 并输出 SHAP 归因 ---
+# scikit-learn 必须和训练时一致（1.7.2），否则反序列化 LGBMClassifier 里
+# 的 LabelEncoder 会报 InconsistentVersionWarning，极端情况下预测结果不可信
+lightgbm==4.5.0
+scikit-learn==1.7.2

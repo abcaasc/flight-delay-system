@@ -230,6 +230,9 @@ def predict_single(origin: str, dest: str, airline: str, flight_date: str,
     prob = float(result["prob"][0])
     contrib = result["contrib"].iloc[0]
     factors = model_service.top_factors(contrib, prob, k=top_k)
+    model_inputs = model_service._feature_frame(features).iloc[0]
+    for factor in factors:
+        factor["feature_value"] = _safe(model_inputs[factor["feature"]])
     threshold = result["threshold"]
     bias = float(result["base_logit"][0])
     baseline_prob = float(1 / (1 + math.exp(-bias)))

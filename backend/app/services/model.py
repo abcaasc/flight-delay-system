@@ -85,6 +85,13 @@ CALIBRATION_FILE = Path(Config.MODEL_ROOT) / "calibration.json"
 _CALIBRATION_CACHE: dict | None = None
 _CALIBRATION_MTIME: float = 0.0
 
+# 自动上线产物的缓存（key 为模型文件 mtime），避免每次预测都反序列化 1MB 的 pkl
+_AUTOLOAD_CACHE: dict | None = None
+_AUTOLOAD_MTIME: float = 0.0
+
+# lightgbm 可用性探测结果（只探测一次）
+_LGBM_STATE: dict[str, Any] = {}
+
 
 def load_calibration() -> dict:
     """读取校准参数（mtime 变化时自动重载）；无文件时用默认值。"""
@@ -264,25 +271,37 @@ def _level3(prob: np.ndarray) -> np.ndarray:
 
 # ============================================================ 在线模型
 def _lightgbm_available() -> bool:
+    """探测 lightgbm 是否可用（只探测一次，失败原因打一条日志便于排查镜像缺库）。"""
+    if "ok" in _LGBM_STATE:
+        return bool(_LGBM_STATE["ok"])
     try:
         import lightgbm  # noqa: F401
-        return True
-    except Exception:
-        return False
+        _LGBM_STATE["ok"] = True
+    except Exception as exc:  # 常见：slim 镜像缺 libgomp.so.1
+        _LGBM_STATE["ok"] = False
+        log.warning("lightgbm 不可用，降级为内置基线模型：%s", exc)
+    return bool(_LGBM_STATE["ok"])
 
 
 def online_model(model_ver: str | None = None) -> dict | None:
-    """读取当前上线模型；无则返回 None（走基线）。"""
+    """读取当前上线模型；无则返回 None（走基线）。
+
+    两步查找：
+      1. 业务库 `model_version` 表的 is_online 记录（正式上线流程走这条）；
+      2. 表里没有记录 / 产物文件丢失时，自动上线 MODEL_ROOT 下最新的
+         `lightgbm_cls15_*.pkl`（公网演示容器每次重建都是全新 SQLite，
+         没有这一步就只能跑降级基线，展示不出论文里训练的模型）。
+    """
     query = db.session.query(ModelVersion)
     query = query.filter_by(model_ver=model_ver) if model_ver else query.filter_by(is_online=1, task="cls15")
     row = query.order_by(
         ModelVersion.id.desc()).first()
     if row is None:
-        return None
+        return None if model_ver else autoload_model()
     path = Path(row.artifact_path)
     if not row.artifact_path or not path.exists():
         log.warning("上线模型的产物文件不存在：%s", row.artifact_path)
-        return None
+        return None if model_ver else autoload_model()
     try:
         with open(path, "rb") as fh:
             payload = pickle.load(fh)
@@ -290,7 +309,49 @@ def online_model(model_ver: str | None = None) -> dict | None:
         return payload
     except Exception as exc:
         log.warning("加载模型 %s 失败：%s", row.model_ver, exc)
+        return None if model_ver else autoload_model()
+
+
+def _discover_artifact() -> Path | None:
+    """在 MODEL_ROOT 下找最新的 LightGBM 二分类产物（找不到再退回任意 pkl）。"""
+    root = Path(Config.MODEL_ROOT)
+    if not root.is_dir():
         return None
+    for pattern in ("lightgbm_cls15_*.pkl", "*.pkl"):
+        candidates = [p for p in root.glob(pattern) if p.is_file()]
+        if candidates:
+            return max(candidates, key=lambda p: p.stat().st_mtime)
+    return None
+
+
+def autoload_model() -> dict | None:
+    """自动上线 MODEL_ROOT 下最新的 LightGBM 产物（带 mtime 缓存，只反序列化一次）。"""
+    global _AUTOLOAD_CACHE, _AUTOLOAD_MTIME
+    path = _discover_artifact()
+    if path is None:
+        return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    if _AUTOLOAD_CACHE is not None and mtime == _AUTOLOAD_MTIME:
+        return _AUTOLOAD_CACHE
+    if not _lightgbm_available():
+        return None
+    try:
+        with open(path, "rb") as fh:
+            payload = pickle.load(fh)
+    except Exception as exc:
+        log.warning("自动上线模型 %s 失败：%s", path.name, exc)
+        return None
+    if payload.get("kind") != "lightgbm" or payload.get("task") != "cls15":
+        return None
+    payload["model_ver"] = payload.get("model_ver") or path.stem
+    payload["meta"] = {"model_ver": payload["model_ver"], "artifact_path": str(path),
+                       "source": "autoload", "is_online": 1, "task": "cls15"}
+    _AUTOLOAD_CACHE, _AUTOLOAD_MTIME = payload, mtime
+    log.info("数据库无上线记录，自动上线模型产物：%s", path.name)
+    return payload
 
 
 def predict_frame(features: pd.DataFrame, model_ver: str | None = None) -> dict:

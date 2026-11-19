@@ -1,4 +1,4 @@
-﻿"""接口层测试：认证、权限、统一响应结构、参数校验、上传白名单、周期校验。"""
+"""接口层测试：认证、权限、统一响应结构、参数校验、上传白名单、周期校验。"""
 from __future__ import annotations
 
 
@@ -136,9 +136,13 @@ class TestSystem:
         assert "/api/v1/crossdomain/china" in paths
 
     def test_index(self, client):
-        payload = client.get("/").get_json()
+        # 带前端构建产物时 / 直接吐 SPA 首页，模块清单退到 /api/v1
+        payload = client.get("/api/v1").get_json()
         assert payload["code"] == 0
         assert "modules" in payload["data"]
+        home = client.get("/")
+        assert home.status_code == 200
+        assert home.mimetype in ("text/html", "application/json")
 
 
 class TestQuality:
