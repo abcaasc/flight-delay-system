@@ -2,7 +2,7 @@
 import { computed, reactive, ref, watch } from "vue";
 import { PlaneTakeoff, ChevronLeft, ChevronRight, Download, X } from "lucide-vue-next";
 import Card from "./Card.vue";
-import { ApiError, downloadCsv, monthRange, number } from "../lib/dashboard";
+import { ApiError, downloadCsv, monthRange, number, type Coverage } from "../lib/dashboard";
 import { airportNames } from "../lib/airports";
 import { airlines } from "../lib/airlines";
 import { useQuery } from "../lib/useQuery";
@@ -46,7 +46,7 @@ function openDetail(flight: Flight) {
 const datesValid = computed(() => range && filters.start >= range.date_from && filters.end <= range.date_to
   && filters.start <= filters.end && !!filters.start && !!filters.end);
 watch(filters, () => { page.value = 1; }, { flush: "sync" });
-const { data, error, loading, reload } = useQuery<{ items: Flight[]; total: number }>(() => {
+const { data, error, loading, reload } = useQuery<{ items: Flight[]; total: number; coverage: Coverage }>(() => {
   if (!datesValid.value) return "";
   const params = new URLSearchParams({ date_from: filters.start, date_to: filters.end,
     page: String(page.value), page_size: String(size), sort_by: filters.sort,
@@ -60,6 +60,8 @@ const { data, error, loading, reload } = useQuery<{ items: Flight[]; total: numb
 });
 watch(() => props.refresh, reload);
 const empty = computed(() => data.value?.total === 0 || (error.value instanceof ApiError && error.value.code === 522));
+const unavailable = computed(() => error.value instanceof ApiError && error.value.code === 521);
+const sampled = computed(() => !!data.value?.coverage?.sampled_months.length);
 function hhmm(raw: Flight["dep_hhmm"]) {
   if (raw == null || raw === "") return "—";
   const s = String(raw).padStart(4, "0");
@@ -72,7 +74,7 @@ function cells(f: Flight) {
     f.cancelled === 1 ? "已取消" : f.dep_delay_min == null ? "缺少记录" : f.dep_delay_min >= 15 ? "延误" : "准点"];
 }
 function exportPage() {
-  if (data.value?.items.length) downloadCsv([headings, ...data.value.items.map(cells)], `航班明细-${props.month}-第${page.value}页.csv`);
+  if (data.value?.items.length) downloadCsv([headings, ...data.value.items.map(cells)], `航班明细-${sampled.value ? "抽样-" : ""}${props.month}-第${page.value}页.csv`);
 }
 </script>
 
@@ -87,9 +89,11 @@ function exportPage() {
       <label>航班状态<select v-model="filters.status"><option value="">全部状态</option><option value="operated">已执行</option><option value="delayed">离港延误 ≥ 15 分钟</option><option value="cancelled">已取消</option></select></label>
       <label>排序<select v-model="filters.sort"><option value="dep_delay_min">离港延误从长到短</option><option value="flight_date">航班日期从早到晚</option></select></label>
     </div>
+    <p v-if="sampled" class="work-message" role="status">本月显示抽样航班明细，查询结果和架次仅代表样本。</p>
     <p v-if="!datesValid" class="work-message" role="alert">请在所选统计月份内填写有效的起止日期。</p>
     <p v-else-if="loading" class="work-message" role="status">正在查询航班…</p>
-    <p v-else-if="empty" class="work-message" role="status">当前条件下没有航班。</p>
+    <p v-else-if="unavailable" class="work-message" role="status">该月份暂无逐班明细，请切换月份。</p>
+    <p v-else-if="empty" class="work-message" role="status">{{ sampled ? "样本中没有符合条件的航班。" : "当前条件下没有航班。" }}</p>
     <div v-else-if="error" class="work-message" role="alert">{{ error.message }} <button class="text-button" @click="reload">重试</button></div>
     <div v-else-if="data" class="table-scroll"><table>
       <thead><tr><th v-for="name in headings" :key="name">{{ name }}</th></tr></thead>

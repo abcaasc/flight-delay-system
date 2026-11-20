@@ -7,6 +7,7 @@ test("real warehouse: airport changes KPI, network, ranking and daily values tog
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("/");
+  await page.getByLabel("统计月份", { exact: true }).fill("2015-01");
   await expect(page.locator(".network-map svg")).toBeVisible();
   const whole = await page.getByTestId("航班总量").innerText();
   const allPaths = await page
@@ -42,6 +43,7 @@ test("missing month clears old data; recovery restores all charts", async ({
   page,
 }) => {
   await page.goto("/");
+  await page.getByLabel("统计月份", { exact: true }).fill("2015-01");
   await expect(page.locator(".network-map")).toBeVisible();
   // 数据全量入库后 2015-02 也会就绪，用明确的 521 响应稳定验证无数据恢复。
   await page.route("**/api/v1/overview?**date_from=2015-02-01**", route => route.fulfill({
@@ -93,6 +95,7 @@ test("navigation icons, stable external ring, chart lifecycle, download", async 
   page,
 }) => {
   await page.goto("/");
+  await page.getByLabel("统计月份", { exact: true }).fill("2015-01");
   await expect(page.locator(".network-map")).toBeVisible();
   await expect(page.locator("nav button>svg:first-child")).toHaveCount(6);
   const initialBox = await page

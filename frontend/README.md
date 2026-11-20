@@ -36,11 +36,25 @@ npm run dev
 
 ```powershell
 npm run build
-npm run preview
+```
+
+前端构建完成后，从后端目录在两个终端分别启动浏览器测试服务。
+
+```powershell
+python scripts/serve_qa.py warehouse --port 5174
+python scripts/serve_qa.py demo --port 5175
+```
+
+完整数仓回归需要 2015 年 1 月和 2024 年 12 月的本地数据。演示回归使用仓库自带的数仓。测试服务分别创建 SQLite 测试库，只监听本机。然后在前端目录运行以下命令。
+
+```powershell
+$env:AIRTRACE_TEST_BASE_URL = 'http://127.0.0.1:5174'
+$env:AIRTRACE_TEST_ADMIN_PASSWORD = 'admin123'
+$env:AIRTRACE_TEST_OPS_PASSWORD = 'ops123'
 npx playwright test
 ```
 
-Playwright 使用本机 Chrome，需要前后端正在运行。覆盖真实接口筛选、无数据恢复、演示聚合一致性、导航外环、图表切页生命周期、导出和响应式布局。首次安装可按 Playwright 官方说明准备浏览器。
+可用 `--project warehouse` 或 `--project demo` 单独运行对应套件。测试使用本机 Chrome。
 
 `dist` 为静态生产产物；生产环境将 `/api` 反向代理至 Flask，其余请求映射静态产物。开发代理位于 `vite.config.ts`，默认 Flask 地址为 `http://127.0.0.1:5000`。图表与地理模块分包按需加载。
 

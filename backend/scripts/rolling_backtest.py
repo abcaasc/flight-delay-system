@@ -13,7 +13,7 @@ from sklearn.base import clone
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import create_app
-from app.config import BASE_DIR
+from app.config import Config
 from app.services import model
 
 
@@ -61,10 +61,12 @@ def fold(test, prototype):
             **evaluate(learner, x, y, threshold)}
 
 
-def run(test_periods, output):
-    online = model.online_model()
+def run(test_periods, output, model_version=None):
+    online = model.online_model(model_version)
     if not online or online["kind"] != "lightgbm" or online["task"] != "cls15":
         raise ValueError("需要已上线的 LightGBM 二分类模型")
+    if online.get("feature_profile") == "form":
+        raise ValueError("表单模型的指标由 train --profile form 生成。请用 --model-version 指定数仓模型重跑缺链对照。")
     meta = online["meta"]
     test_range = meta["test_range"].split("~")
     if len(test_range) != 2 or not meta["train_range"].split("~")[-1] < test_range[0] <= test_range[1]:
@@ -91,7 +93,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--test-months", nargs="+", default=[
         "2015-04", "2018-07", "2020-10", "2022-01", "2024-03", "2024-06", "2024-09", "2024-12"])
+    parser.add_argument("--model-version", help="指定已登记的数仓模型版本")
     args = parser.parse_args()
     with create_app().app_context():
         run(sorted(set(pd.Period(p, freq="M") for p in args.test_months)),
-            BASE_DIR / "instance" / "rolling-backtest.json")
+            Config.ROLLING_BACKTEST_REPORT, args.model_version)

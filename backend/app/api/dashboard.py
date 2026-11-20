@@ -167,5 +167,8 @@ def export_overview():
     kpi = stats.overview_kpi(args["date_from"], args["date_to"],
                              tuple(args["airports"]), tuple(args["airlines"]))
     rows = [{"指标": k, "取值": v} for k, v in kpi["kpi"].items()]
+    if kpi["coverage"]["missing_months"]:
+        rows.extend([{"指标": "实际涵盖月份", "取值": ",".join(kpi["coverage"]["available_months"])},
+                     {"指标": "缺失月份", "取值": ",".join(kpi["coverage"]["missing_months"])}])
     return csv_response(rows, "overview_kpi")
 

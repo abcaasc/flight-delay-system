@@ -17,6 +17,7 @@ def network_data(monkeypatch):
         {"origin": "LAX", "dest": "ORD", "route_key": "LAX-ORD", "stat_date": "2015-01-01", "flights": 100, "dep_del15_cnt": 10, "cancelled_cnt": 0, "dep_delay_sum_min": 500, "distance_mi": 1000},
     ]
     monkeypatch.setattr(stats, "_read_periods", lambda table, *a, **kw: pd.DataFrame(node_rows if table == "dws_airport_hourly" else route_rows))
+    monkeypatch.setattr(stats.engine.BaseEngine, "available_periods", lambda table: ["2015-01"])
     monkeypatch.setattr(stats, "airport_dim", lambda: {})
 
 

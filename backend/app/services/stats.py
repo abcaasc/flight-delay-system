@@ -4,9 +4,11 @@
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -139,15 +141,48 @@ def _read_periods(table: str, months: list[str], columns=None, filters=None) -> 
     return pd.concat(frames, ignore_index=True)
 
 
-def _apply_scope(df: pd.DataFrame, airports: list[str], airlines: list[str],
-                 column: str = "airport_iata") -> pd.DataFrame:
-    if airports and column in df.columns:
-        df = df[df[column].astype(str).isin(airports)]
+def month_coverage(months, *tables, full_flights_only=False) -> dict:
+    requested = set(months)
+    available = requested.intersection(*(engine.BaseEngine.available_periods(table) for table in tables))
+    sampled = set()
+    if "dwd_flight_detail" in tables:
+        path = Path(Config.WAREHOUSE_ROOT) / "_sampled_flight_months.json"
+        if path.is_file():
+            sampled = available.intersection(json.loads(path.read_text(encoding="utf-8")))
+        if full_flights_only:
+            available.difference_update(sampled)
+    return {"available_months": sorted(available), "missing_months": sorted(requested - available),
+            "sampled_months": sorted(sampled)}
+
+
+def _overview_counts(start, end, airports, airlines) -> tuple[pd.DataFrame, dict]:
+    months = _months_between(start, end)
+    table = "dwd_flight_detail" if airlines else "dws_airport_hourly"
+    coverage = month_coverage(months, table, full_flights_only=bool(airlines))
+    if not coverage["available_months"]:
+        reason = "缺少航司维度的完整航班明细" if airlines else "无汇总数据"
+        raise ApiError(ErrCode.DATA_NOT_READY, f"{start}~{end} {reason}", data=coverage)
+    dates = [("flight_date" if airlines else "stat_date", ">=", start),
+             ("flight_date" if airlines else "stat_date", "<=", end)]
+    origin = "origin" if airlines else "airport_iata"
+    scope = [(origin, "in", airports)] if airports else []
     if airlines:
-        target = "reporting_airline" if "reporting_airline" in df.columns else None
-        if target:
-            df = df[df[target].astype(str).isin(airlines)]
-    return df
+        flights = _read_periods(table, coverage["available_months"],
+                                columns=["origin", "flight_date", "dep_del15", "cancelled",
+                                         "delay_level", "dep_delay_min"],
+                                filters=[*dates, *scope, ("reporting_airline", "in", airlines)])
+        counts = flights.rename(columns={"origin": "airport_iata", "flight_date": "stat_date",
+                                         "dep_delay_min": "dep_delay_sum_min"})
+        counts["flights"] = 1
+        counts["cancelled_cnt"] = counts["cancelled"].eq(1).fillna(False).astype(int)
+        counts["dep_del15_cnt"] = counts["dep_del15"].eq(1).fillna(False).astype(int)
+        counts["severe_cnt"] = counts["delay_level"].eq(2).fillna(False).astype(int)
+    else:
+        counts = _read_periods(table, coverage["available_months"],
+                               columns=["airport_iata", "stat_date", "flights", "dep_del15_cnt",
+                                        "cancelled_cnt", "dep_delay_sum_min", "severe_cnt"],
+                               filters=[*dates, *scope])
+    return counts, coverage
 
 
 # ---------------------------------------------------------------- P1 总览
@@ -156,13 +191,7 @@ def overview_kpi(date_from: str | None = None, date_to: str | None = None,
                  airports: tuple[str, ...] = (), airlines: tuple[str, ...] = ()) -> dict:
     start, end = period_range(date_from, date_to)
     months = _months_between(start, end)
-    dws = _read_periods("dws_airport_hourly", months,
-                        columns=["airport_iata", "stat_date", "flights", "dep_del15_cnt",
-                                 "cancelled_cnt", "dep_delay_sum_min", "severe_cnt"])
-    if dws.empty:
-        raise ApiError(ErrCode.DATA_NOT_READY, f"{start}~{end} 无汇总数据")
-    dws = dws[(dws["stat_date"].astype(str) >= start) & (dws["stat_date"].astype(str) <= end)]
-    dws = _apply_scope(dws, list(airports), list(airlines))
+    dws, coverage = _overview_counts(start, end, airports, airlines)
 
     flights = int(dws["flights"].sum())
     delayed = int(dws["dep_del15_cnt"].sum())
@@ -171,10 +200,11 @@ def overview_kpi(date_from: str | None = None, date_to: str | None = None,
     delay_sum = float(dws["dep_delay_sum_min"].sum())
 
     # 环比：与区间等长的前一段
-    prev_kpi = _previous_window_kpi(start, end, airports, airlines)
+    prev_kpi = {} if coverage["missing_months"] else _previous_window_kpi(start, end, airports, airlines)
 
     return {
         "period": {"date_from": start, "date_to": end, "months": months},
+        "coverage": coverage,
         "kpi": {
             "flights": flights,
             "operated": operated,
@@ -198,15 +228,9 @@ def _previous_window_kpi(start: str, end: str, airports, airlines) -> dict:
     days = (pd.Timestamp(end) - pd.Timestamp(start)).days + 1
     prev_end = (pd.Timestamp(start) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     prev_start = (pd.Timestamp(start) - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
-    months = _months_between(prev_start, prev_end)
     try:
-        dws = _read_periods("dws_airport_hourly", months,
-                            columns=["airport_iata", "stat_date", "flights", "dep_del15_cnt",
-                                     "cancelled_cnt", "dep_delay_sum_min"])
-        dws = dws[(dws["stat_date"].astype(str) >= prev_start)
-                  & (dws["stat_date"].astype(str) <= prev_end)]
-        dws = _apply_scope(dws, list(airports), list(airlines))
-        if dws.empty:
+        dws, coverage = _overview_counts(prev_start, prev_end, airports, airlines)
+        if dws.empty or coverage["missing_months"]:
             return {}
         flights = int(dws["flights"].sum())
         operated = flights - int(dws["cancelled_cnt"].sum())
@@ -217,7 +241,9 @@ def _previous_window_kpi(start: str, end: str, airports, airlines) -> dict:
             "ontime_rate": round((operated - delayed) / operated, 4) if operated else None,
             "avg_delay_min": round(float(dws["dep_delay_sum_min"].sum()) / operated, 2) if operated else None,
         }
-    except Exception:
+    except ApiError as exc:
+        if exc.code != ErrCode.DATA_NOT_READY:
+            raise
         return {}
 
 
@@ -226,14 +252,9 @@ def overview_trend(date_from: str | None = None, date_to: str | None = None,
                    granularity: str = "day", airports: tuple[str, ...] = (),
                    airlines: tuple[str, ...] = ()) -> dict:
     start, end = period_range(date_from, date_to)
-    months = _months_between(start, end)
-    dws = _read_periods("dws_airport_hourly", months,
-                        columns=["airport_iata", "stat_date", "flights", "dep_del15_cnt",
-                                 "cancelled_cnt", "dep_delay_sum_min"])
-    dws = dws[(dws["stat_date"].astype(str) >= start) & (dws["stat_date"].astype(str) <= end)]
-    dws = _apply_scope(dws, list(airports), list(airlines))
+    dws, coverage = _overview_counts(start, end, airports, airlines)
     if dws.empty:
-        raise ApiError(ErrCode.DATA_NOT_READY, "区间内无数据")
+        return {"granularity": granularity, "points": [], "coverage": coverage}
 
     dws["bucket"] = (dws["stat_date"].astype(str) if granularity == "day"
                      else dws["stat_date"].astype(str).str.slice(0, 7))
@@ -248,6 +269,7 @@ def overview_trend(date_from: str | None = None, date_to: str | None = None,
     grouped["avg_delay_min"] = (grouped["delay_sum"] / grouped["operated"].replace(0, np.nan)).round(2)
     return {
         "granularity": granularity,
+        "coverage": coverage,
         "points": engine.to_records(grouped[["bucket", "flights", "operated", "delayed",
                                              "cancelled", "ontime_rate", "delay_rate",
                                              "cancel_rate", "avg_delay_min"]]),
@@ -259,14 +281,18 @@ def delay_distribution(date_from: str | None = None, date_to: str | None = None,
                        airports: tuple[str, ...] = ()) -> dict:
     """延误时长分布（P1 分布图）。用 DWD 明细分箱，避免预聚合丢失分布形态。"""
     start, end = period_range(date_from, date_to)
-    months = _months_between(start, end)
-    df = _read_periods("dwd_flight_detail", months, columns=["flight_date", "origin", "dep_delay_min"])
+    coverage = month_coverage(_months_between(start, end), "dwd_flight_detail")
+    if not coverage["available_months"]:
+        raise ApiError(ErrCode.DATA_NOT_READY, "统计范围内缺少逐班明细", data=coverage)
+    df = _read_periods("dwd_flight_detail", coverage["available_months"],
+                       columns=["flight_date", "origin", "dep_delay_min"])
     df = df[(df["flight_date"].astype(str) >= start) & (df["flight_date"].astype(str) <= end)]
     if airports:
         df = df[df["origin"].astype(str).isin(airports)]
     values = pd.to_numeric(df["dep_delay_min"], errors="coerce")
     return {
         "samples": int(values.notna().sum()),
+        "coverage": coverage,
         "buckets": bucket_delay(values),
         "mean": round(float(values.mean()), 2) if values.notna().any() else None,
         "threshold_min": Config.ONTIME_THRESHOLD_MIN,
@@ -354,7 +380,10 @@ def network_graph(date_from: str | None = None, date_to: str | None = None,
                   min_flights: int = 1, airports: tuple[str, ...] = ()) -> dict:
     start, end = period_range(date_from, date_to)
     months = _months_between(start, end)
-    nodes_df = _read_periods("dws_airport_hourly", months,
+    coverage = month_coverage(months, "dws_airport_hourly", "dws_route_daily")
+    if not coverage["available_months"]:
+        raise ApiError(ErrCode.DATA_NOT_READY, f"{start}~{end} 无网络数据", data=coverage)
+    nodes_df = _read_periods("dws_airport_hourly", coverage["available_months"],
                              columns=["airport_iata", "stat_date", "flights", "dep_del15_cnt",
                                       "cancelled_cnt", "dep_delay_sum_min"])
     nodes_df = nodes_df[(nodes_df["stat_date"].astype(str) >= start)
@@ -394,7 +423,7 @@ def network_graph(date_from: str | None = None, date_to: str | None = None,
         })
     nodes.sort(key=lambda n: n["flights"], reverse=True)
 
-    routes_df = _read_periods("dws_route_daily", months,
+    routes_df = _read_periods("dws_route_daily", coverage["available_months"],
                               columns=["origin", "dest", "route_key", "stat_date", "flights", "dep_del15_cnt",
                                        "cancelled_cnt", "dep_delay_sum_min", "distance_mi"])
     if not routes_df.empty:
@@ -431,6 +460,7 @@ def network_graph(date_from: str | None = None, date_to: str | None = None,
     scope_nodes = [n for n in nodes if not airports or n["id"] in airports]
     return {
         "period": {"date_from": start, "date_to": end},
+        "coverage": coverage,
         "metric": metric,
         "filter": {"airports": list(airports), "direction": "departure"},
         "nodes": nodes,
@@ -452,12 +482,13 @@ def delay_heatmap(date_from: str | None = None, date_to: str | None = None,
                   top: int = 20, metric: str = "delay_rate") -> dict:
     """机场×小时热力图（P2/P1 共用）。"""
     start, end = period_range(date_from, date_to)
-    months = _months_between(start, end)
-    df = _read_periods("dws_airport_hourly", months,
+    coverage = month_coverage(_months_between(start, end), "dws_airport_hourly")
+    if not coverage["available_months"]:
+        raise ApiError(ErrCode.DATA_NOT_READY, "无热力图数据", data=coverage)
+    df = _read_periods("dws_airport_hourly", coverage["available_months"],
                        columns=["airport_iata", "stat_hour", "flights", "dep_del15_cnt",
-                                "cancelled_cnt", "dep_delay_sum_min"])
-    if df.empty:
-        raise ApiError(ErrCode.DATA_NOT_READY, "无热力图数据")
+                                "cancelled_cnt", "dep_delay_sum_min"],
+                       filters=[("stat_date", ">=", start), ("stat_date", "<=", end)])
     top_airports = (df.groupby("airport_iata")["flights"].sum()
                     .sort_values(ascending=False).head(top).index.tolist())
     df = df[df["airport_iata"].isin(top_airports)]
@@ -485,6 +516,7 @@ def delay_heatmap(date_from: str | None = None, date_to: str | None = None,
         matrix[i][hour] = _num(round(float(row["value"]), 4) if row["value"] is not None else None)
     return {
         "metric": metric,
+        "coverage": coverage,
         "hours": list(range(24)),
         "airports": [{"id": iata, "name": dim.get(iata, {}).get("name", iata)} for iata in top_airports],
         "matrix": matrix,
@@ -673,44 +705,32 @@ def flights_query(date_from: str | None = None, date_to: str | None = None,
                "wind_max_ms", "weather_class", "src_file"]
     start, end = period_range(date_from, date_to)
     months = _months_between(start, end)
-    frames = []
-    for month in months:
-        filters = [("year_month", "=", month), ("flight_date", ">=", start), ("flight_date", "<=", end)]
-        if origin:
-            filters.append(("origin", "=", origin.upper()))
-        if dest:
-            filters.append(("dest", "=", dest.upper()))
-        if airline:
-            filters.append(("reporting_airline", "=", airline.upper()))
-        part = engine.read("dwd_flight_detail", columns=columns, filters=filters)
-        if not part.empty:
-            frames.append(part)
-    if not frames:
-        raise ApiError(ErrCode.EMPTY_RESULT, f"{start}~{end} 无符合条件的航班")
-    df = pd.concat(frames, ignore_index=True)
-    df = df[(df["flight_date"].astype(str) >= start) & (df["flight_date"].astype(str) <= end)]
-    df["dep_delay_min"] = pd.to_numeric(df["dep_delay_min"], errors="coerce")
+    table = "dwd_flight_detail"
+    coverage = month_coverage(months, table)
+    if not coverage["available_months"]:
+        raise ApiError(ErrCode.DATA_NOT_READY, f"当前数仓缺少 {', '.join(months)} 的逐班明细",
+                       data=coverage)
+    filters = [("year_month", "in", coverage["available_months"]),
+               ("flight_date", ">=", start), ("flight_date", "<=", end)]
+    for column, value in (("origin", origin), ("dest", dest), ("reporting_airline", airline)):
+        if value:
+            filters.append((column, "=", value.upper()))
     if min_delay is not None:
-        df = df[df["dep_delay_min"] >= min_delay]
+        filters.append(("dep_delay_min", ">=", min_delay))
     if max_delay is not None:
-        df = df[df["dep_delay_min"] <= max_delay]
+        filters.append(("dep_delay_min", "<=", max_delay))
     if cancelled is not None:
-        df = df[(pd.to_numeric(df["cancelled"], errors="coerce") == 1) == cancelled]
-
-    total = int(len(df))
-    if sort_by in df.columns:
-        df = df.sort_values([sort_by, "flight_sk"], ascending=[order == "asc", True], na_position="last")
+        filters.append(("cancelled", "in" if cancelled else "not in", [1]))
     if limit:
-        df = df.head(limit)
-        page, page_size = 1, len(df)
-    offset = (page - 1) * page_size
-    sliced = df.iloc[offset:offset + page_size]
-    keep = [c for c in columns if c in sliced.columns]
+        page, page_size = 1, limit
+    rows, total = engine.get_engine().page(table, columns, filters, sort_by, order == "asc",
+                                           (page - 1) * page_size, page_size)
     return {
         "total": total,
         "page": page,
-        "page_size": page_size,
-        "items": engine.to_records(sliced[keep]),
+        "page_size": len(rows) if limit else page_size,
+        "items": engine.to_records(rows) if not rows.empty else [],
+        "coverage": coverage,
         "filters": {
             "date_from": start, "date_to": end, "origin": origin, "dest": dest,
             "airline": airline, "min_delay": min_delay, "max_delay": max_delay,

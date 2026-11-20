@@ -23,7 +23,7 @@ interface PredictionResult {
   explanation: { factors: RiskFactor[] };
   model_ver: string;
   engine: string;
-  meta: { weather_source: string; rate_source_period: string | null };
+  meta: { weather_source: string; rate_source_period: string | null; feature_profile?: "form" };
 }
 
 import { airlines } from "../lib/airlines";
@@ -32,6 +32,7 @@ const weatherLabels: Record<string, string> = {
   observation: "起飞前 1–3 小时的历史观测",
   climatology: "历史气候估计，缺测时取默认值",
   default: "缺少观测，采用默认值",
+  missing: "缺少起飞前观测，气象特征按缺失处理",
 };
 const inputUnits: Record<string, string> = {
   distance_mi: "英里",
@@ -192,13 +193,19 @@ async function predict() {
               <b>{{ formatImpact(factor) }}</b>
             </li>
           </ul>
-          <p class="form-note">气象输入 · {{ weatherLabels[result.meta.weather_source] || result.meta.weather_source }}</p>
-          <p class="form-note">百分点表示模型对输入的近似响应。单航班输入缺少前序飞机信息，相关贡献来自模型对缺失值的处理。</p>
+          <template v-if="result.meta.feature_profile === 'form'">
+            <p class="form-note">表单模型使用日期、计划时刻和航段的大圆距离。</p>
+            <p v-if="result.meta.weather_source !== 'unused'" class="form-note">气象输入 · {{ weatherLabels[result.meta.weather_source] }}</p>
+          </template>
+          <p v-else class="form-note">气象输入 · {{ weatherLabels[result.meta.weather_source] || result.meta.weather_source }}。前序飞机信息按缺失处理。</p>
+          <p class="form-note">百分点表示模型对输入的近似响应。</p>
           <details class="model-details">
             <summary>模型与输入来源</summary>
             <dl>
               <dt>模型版本</dt><dd>{{ result.model_ver }}</dd>
-              <dt>近期延误率</dt><dd>{{ result.meta.rate_source_period ? "起飞日前七日的历史记录" : "缺少近期记录，采用回退值" }}</dd>
+              <template v-if="result.meta.feature_profile !== 'form'">
+                <dt>近期延误率</dt><dd>{{ result.meta.rate_source_period ? "起飞日前七日的历史记录" : "缺少近期记录，采用回退值" }}</dd>
+              </template>
             </dl>
           </details>
         </motion.div>

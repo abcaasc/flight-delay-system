@@ -136,7 +136,7 @@ class TestSystem:
         assert "/api/v1/crossdomain/china" in paths
 
     def test_index(self, client):
-        # 带前端构建产物时 / 直接吐 SPA 首页，模块清单退到 /api/v1
+        # API 模块清单和无前端产物时的根路径均可访问。
         payload = client.get("/api/v1").get_json()
         assert payload["code"] == 0
         assert "modules" in payload["data"]

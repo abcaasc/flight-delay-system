@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("ranking uses executed samples and drills into matching delayed flights", async ({ page }) => {
   await page.goto("/");
+  await page.getByLabel("统计月份", { exact: true }).fill("2015-01");
   const first = page.locator(".rank-row").first();
   await expect(first).toContainText("GUM");
   await expect(first).toContainText("15 / 31");
@@ -36,12 +37,15 @@ test("authenticated operations exposes monthly jobs, quality, failures and paire
   const password = process.env.AIRTRACE_TEST_ADMIN_PASSWORD;
   test.skip(!password, "需要本机管理测试账号");
   await page.goto("/");
+  await page.getByLabel("统计月份", { exact: true }).fill("2015-01");
   await page.getByRole("button", { name: "延误预测", exact: true }).click();
   await page.getByRole("button", { name: "查看模型验证" }).click();
   await page.getByLabel("应用账号").fill(process.env.AIRTRACE_TEST_ADMIN_USER || "admin");
   await page.getByLabel("应用密码").fill(password!);
+  const backtest = page.waitForResponse(r => r.url().endsWith("/model/backtest"));
   await page.getByRole("button", { name: "登录", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "上线模型留出测试" })).toBeVisible();
+  const { data } = await (await backtest).json();
+  await expect(page.getByRole("heading", { name: data.current ? "上线模型留出测试" : "历史模型留出测试" })).toBeVisible();
   await expect(page.getByText("屏蔽前序航班", { exact: true })).toBeVisible();
   expect(await page.locator("table").nth(1).locator("tbody tr").count()).toBeGreaterThan(1);
   await page.screenshot({ path: "test-results/model-validation.png" });
@@ -64,6 +68,7 @@ test("monitoring role can read quality but cannot read failed files", async ({ p
   const password = process.env.AIRTRACE_TEST_OPS_PASSWORD;
   test.skip(!password, "需要本机监控测试账号");
   await page.goto("/");
+  await page.getByLabel("统计月份", { exact: true }).fill("2015-01");
   await page.getByRole("button", { name: "数据管理", exact: true }).click();
   await page.getByLabel("应用账号").fill(process.env.AIRTRACE_TEST_OPS_USER || "ops");
   await page.getByLabel("应用密码").fill(password!);

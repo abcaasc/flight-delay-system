@@ -77,6 +77,11 @@ FEATURE_SPECS: dict[str, FeatureSpec] = {
     "tmp_mean_c": FeatureSpec(15, 10, 0.0, "起飞前窗口均温（℃）"),
     "precip_mm": FeatureSpec(0.2, 1.5, 0.20, "起飞前窗口降水（mm）"),
 }
+# 这组特征由日期、计划时刻和机场坐标直接生成，训练与网页使用同一计算。
+FORM_FEATURES = ["dep_hour", "dep_slot", "month", "day_of_week", "distance_mi"]
+FORM_WEATHER_DEFAULTS = {"vis_min_mi": 9.0, "wind_max_ms": 0.0, "tmp_mean_c": 15.0, "precip_mm": 0.0}
+FORM_WEATHER_FEATURES = ["weather_available", *FORM_WEATHER_DEFAULTS]
+FORM_MIN_VALIDATION_RECALL = 0.40
 BASELINE_BIAS = -1.15
 
 # 校准参数文件：训练时把"基线截距"校准到训练集的实际延误率，并按验证集搜索最优判定阈值。
@@ -187,6 +192,30 @@ def _feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def form_feature_frame(rows: pd.DataFrame, with_weather: bool = False) -> pd.DataFrame:
+    from app.services.predict_service import route_distance
+
+    dates = pd.to_datetime(rows["flight_date"], errors="coerce")
+    routes = rows[["origin", "dest"]].astype(str)
+    distances = {(origin, dest): route_distance(origin, dest) or 800.0
+                 for origin, dest in routes.drop_duplicates().itertuples(index=False, name=None)}
+    frame = pd.DataFrame({
+        "dep_hour": pd.to_numeric(rows["dep_hour"], errors="coerce"),
+        "dep_slot": pd.to_numeric(rows["dep_slot"], errors="coerce"),
+        "month": dates.dt.month,
+        "day_of_week": dates.dt.dayofweek,
+        "distance_mi": [distances[pair] for pair in routes.itertuples(index=False, name=None)],
+    }, index=rows.index).astype("float64")
+    if with_weather:
+        weather = rows.reindex(columns=FORM_WEATHER_FEATURES)
+        observed = weather["weather_available"].eq(1).fillna(False)
+        frame["weather_available"] = observed.astype(int)
+        for key, default in FORM_WEATHER_DEFAULTS.items():
+            values = pd.to_numeric(weather[key], errors="coerce").astype(float)
+            frame[key] = values.where(np.isfinite(values)).fillna(default).where(observed)
+    return frame
+
+
 def _zscore(features: pd.DataFrame) -> pd.DataFrame:
     z = pd.DataFrame(index=features.index)
     for name, spec in FEATURE_SPECS.items():
@@ -233,6 +262,38 @@ def search_threshold(y_true: np.ndarray, prob: np.ndarray,
         if f1 > best_f1:
             best_t, best_f1 = float(t), f1
     return best_t, best_f1
+
+
+def form_operating_points(y_valid, prob_valid, y_test, prob_test) -> dict:
+    """只用验证集选阈值，在同一留出集上评估两种取舍。"""
+    positives = int(y_valid.sum())
+    if not 0 < positives < len(y_valid):
+        raise ValueError("表单模型的阈值验证集必须包含准点和延误航班")
+    f1_threshold, _ = search_threshold(y_valid, prob_valid)
+    # 把零阈值纳入候选；有延误样本时召回约束始终有解。
+    eligible = []
+    for cutoff in range(101):
+        threshold = cutoff / 100
+        predicted = prob_valid >= threshold
+        true_positive = int(np.count_nonzero(predicted & (y_valid == 1)))
+        if true_positive < FORM_MIN_VALIDATION_RECALL * positives:
+            continue
+        correct = int(np.count_nonzero(predicted == y_valid))
+        false_positive = int(np.count_nonzero(predicted)) - true_positive
+        eligible.append((correct, -false_positive, true_positive, threshold))
+    conservative_threshold = max(eligible)[-1]
+    return {
+        "validation_recall_floor": FORM_MIN_VALIDATION_RECALL,
+        "f1": {
+            "valid": classification_metrics(y_valid, prob_valid, f1_threshold),
+            "test": classification_metrics(y_test, prob_test, f1_threshold),
+        },
+        "conservative": {
+            "valid": classification_metrics(y_valid, prob_valid, conservative_threshold),
+            "test": classification_metrics(y_test, prob_test, conservative_threshold),
+        },
+        "always_ontime": classification_metrics(y_test, np.zeros(len(y_test)), 0.5),
+    }
 
 
 def _pred_minutes(prob: np.ndarray) -> np.ndarray:
@@ -298,8 +359,12 @@ def online_model(model_ver: str | None = None) -> dict | None:
         ModelVersion.id.desc()).first()
     if row is None:
         return None if model_ver else autoload_model()
-    path = Path(row.artifact_path)
-    if not row.artifact_path or not path.exists():
+    path = Path(Config.MODEL_ROOT) / f"{row.model_ver}.pkl"
+    if not path.is_file() and row.artifact_path:
+        legacy_path = Path(row.artifact_path)
+        if legacy_path.is_absolute() and legacy_path.is_file():
+            path = legacy_path
+    if not path.is_file():
         log.warning("上线模型的产物文件不存在：%s", row.artifact_path)
         return None if model_ver else autoload_model()
     try:
@@ -317,8 +382,10 @@ def _discover_artifact() -> Path | None:
     root = Path(Config.MODEL_ROOT)
     if not root.is_dir():
         return None
+    candidates_only = {version for version, in db.session.query(ModelVersion.model_ver)
+                       .filter_by(is_online=0)}
     for pattern in ("lightgbm_cls15_*.pkl", "*.pkl"):
-        candidates = [p for p in root.glob(pattern) if p.is_file()]
+        candidates = [p for p in root.glob(pattern) if p.is_file() and p.stem not in candidates_only]
         if candidates:
             return max(candidates, key=lambda p: p.stat().st_mtime)
     return None
@@ -360,13 +427,15 @@ def predict_frame(features: pd.DataFrame, model_ver: str | None = None) -> dict:
     入参可以是原始特征行（含 origin_traffic_24h 之类的别名列），这里统一做一次
     `_feature_frame` 归一，保证送给模型的列集合与训练时完全一致。
     """
-    features = _feature_frame(features)
     model = online_model(model_ver)
     if model_ver and (not model or model.get("task") != "cls15"):
         raise ValueError(f"二分类模型产物不可用：{model_ver}")
     if model and model.get("kind") == "lightgbm" and model.get("task") == "cls15":
         learner = model["model"]
-        X = features[[m for m in FEATURE_SPECS if m in features.columns]]
+        profile = model.get("feature_profile", "warehouse")
+        with_weather = model.get("form_weather", False)
+        features = form_feature_frame(features, with_weather) if profile == "form" else _feature_frame(features)
+        X = features[model.get("features", list(FEATURE_SPECS))]
         # LGBMClassifier.predict 返回"类别标签"，概率必须走 predict_proba
         if hasattr(learner, "predict_proba"):
             prob = learner.predict_proba(X)[:, 1]
@@ -379,12 +448,14 @@ def predict_frame(features: pd.DataFrame, model_ver: str | None = None) -> dict:
         contrib = pd.DataFrame(np.asarray(raw)[:, :-1], columns=X.columns, index=features.index)
         return {"prob": np.asarray(prob), "contrib": contrib, "engine": "lightgbm",
                 "base_logit": np.asarray(raw)[:, -1], "threshold": float(model.get("threshold", 0.5)),
-                "model_ver": model["meta"]["model_ver"]}
+                "model_ver": model["meta"]["model_ver"], "feature_profile": profile,
+                "form_weather": with_weather, "inputs": X}
+    features = _feature_frame(features)
     bias = float(model.get("bias", BASELINE_BIAS) if model else load_calibration().get("bias", BASELINE_BIAS))
     prob, contrib = baseline_predict(features, bias=bias)
     ver = model["meta"]["model_ver"] if model else baseline_version()
     threshold = float(model.get("threshold", 0.5) if model else load_calibration().get("threshold", 0.5))
-    return {"prob": prob, "contrib": contrib, "engine": "baseline", "model_ver": ver,
+    return {"prob": prob, "contrib": contrib, "engine": "baseline", "model_ver": ver, "inputs": features,
             "base_logit": np.full(len(features), bias), "threshold": threshold}
 
 
@@ -471,15 +542,17 @@ def feature_context(period: str | None = None, as_of: str | None = None) -> dict
 
 
 # ============================================================ 训练与评测
-def load_training_frame(periods: list[str]) -> pd.DataFrame:
+def load_training_frame(periods: list[str], columns=None, sample_per_month: int = 0) -> pd.DataFrame:
     frames = []
     # 训练只读白名单数值特征与切分/标签列；不加载 SHAP 文本等无关宽字段。
-    columns = list(dict.fromkeys(["flight_date", "origin", "dep_del15", "delay_level",
-                                 "dep_delay_min", *MODEL_FEATURES]))
+    columns = columns or list(dict.fromkeys(["flight_date", "origin", "dep_del15", "delay_level",
+                                            "dep_delay_min", *MODEL_FEATURES]))
     for period in periods:
         part = engine.read("dws_flight_features", columns=columns,
                            filters=[("year_month", "=", period)])
         if not part.empty:
+            if sample_per_month and len(part) > sample_per_month:
+                part = part.sample(sample_per_month, random_state=Config.RANDOM_SEED)
             frames.append(part)
     if not frames:
         return pd.DataFrame()
@@ -511,7 +584,19 @@ def train_and_evaluate(periods: list[str], task: str = "cls15", algo: str = "aut
     """训练 + 评测 + 写 ADS 指标与版本记录。返回训练报告。"""
     if task not in TASKS:
         raise ValueError(f"未知任务：{task}")
-    df = load_training_frame(periods)
+    params = params or {}
+    profile = params.get("feature_profile", "warehouse")
+    if profile not in {"warehouse", "form"}:
+        raise ValueError("feature_profile 只能是 warehouse 或 form")
+    if profile == "form" and (task != "cls15" or algo not in ("auto", "lightgbm") or not _lightgbm_available()):
+        raise ValueError("表单特征训练需要 LightGBM 二分类")
+    if profile == "form":
+        df = load_training_frame(periods,
+                                 ["flight_date", "origin", "dest", "dep_hour", "dep_slot", "dep_del15",
+                                  "delay_level", *FORM_WEATHER_FEATURES],
+                                 int(params.get("sample_per_month", 0)))
+    else:
+        df = load_training_frame(periods)
     if df.empty:
         raise ValueError("训练数据为空，请先跑 dws_flight_features")
 
@@ -530,14 +615,16 @@ def train_and_evaluate(periods: list[str], task: str = "cls15", algo: str = "aut
     ratio = Config.TRAIN_VALID_TEST_RATIO
     train, valid, test = _time_split(df, ratio)
     label = TASKS[task]["label"]
-    features = [f for f in FEATURE_SPECS if f in df.columns]
-    X_train = _feature_frame(train)[list(FEATURE_SPECS)]
-    X_test = _feature_frame(test)[list(FEATURE_SPECS)]
+    feature_names = FORM_FEATURES + FORM_WEATHER_FEATURES if profile == "form" else list(FEATURE_SPECS)
+    def assemble(rows):
+        return form_feature_frame(rows, with_weather=True) if profile == "form" else _feature_frame(rows)
+    X_train = assemble(train)
+    X_test = assemble(test)
+    X_valid = assemble(valid) if task == "cls15" else None
 
     use_lgbm = algo in ("auto", "lightgbm") and _lightgbm_available() and task == "cls15"
     if task == "cls15" and train[label].nunique() < 2:
         raise ValueError("二分类训练集必须同时包含准点和延误航班")
-    params = params or {}
     seed = Config.RANDOM_SEED
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     algo_name = "lightgbm" if use_lgbm else "baseline_lr"
@@ -546,10 +633,18 @@ def train_and_evaluate(periods: list[str], task: str = "cls15", algo: str = "aut
         "model_ver": model_ver, "task": task, "algo": algo_name,
         "train_rows": int(len(train)), "valid_rows": int(len(valid)), "test_rows": int(len(test)),
         "train_range": f"{train['flight_date'].min()}~{train['flight_date'].max()}",
+        "valid_range": f"{valid['flight_date'].min()}~{valid['flight_date'].max()}",
         "test_range": f"{test['flight_date'].min()}~{test['flight_date'].max()}",
-        "features": len(FEATURE_SPECS), "seed": seed,
+        "features": len(feature_names), "feature_profile": profile, "seed": seed,
+        "feature_names": feature_names, "periods": periods,
+        "sample_per_month": int(params.get("sample_per_month", 0)),
         "splits": {},
     }
+    if profile == "form":
+        report["observed_weather"] = {
+            "validation": int(X_valid["weather_available"].sum()),
+            "test": int(X_test["weather_available"].sum()),
+        }
 
     artifact_path = ""
     if TASKS[task]["kind"] == "regression":
@@ -595,27 +690,38 @@ def train_and_evaluate(periods: list[str], task: str = "cls15", algo: str = "aut
                 )
                 booster.fit(X_train, y_train)
                 prob_test = booster.predict_proba(X_test)[:, 1]
-                prob_valid = booster.predict_proba(_feature_frame(valid)[list(FEATURE_SPECS)])[:, 1]
+                prob_valid = booster.predict_proba(X_valid)[:, 1]
                 prob_train = booster.predict_proba(X_train)[:, 1]
                 payload = {"kind": "lightgbm", "task": "cls15", "model": booster,
-                           "features": list(FEATURE_SPECS), "model_ver": model_ver}
+                           "features": feature_names, "feature_profile": profile,
+                           "form_weather": profile == "form", "model_ver": model_ver}
                 bias = float(load_calibration().get("bias", BASELINE_BIAS))
             else:
                 # 1) 截距校准：让平均预测概率 ≈ 训练集实际延误率
                 bias = calibrate_bias(_zscore(X_train), y_train)
                 prob_test, _ = baseline_predict(X_test, bias=bias)
-                prob_valid, _ = baseline_predict(_feature_frame(valid), bias=bias)
+                prob_valid, _ = baseline_predict(X_valid, bias=bias)
                 prob_train, _ = baseline_predict(X_train, bias=bias)
                 payload = {"kind": "baseline", "task": task, "bias": bias}
 
-            # 2) 判定阈值在验证集上网格搜索（F1 最优），避免固定 0.5 在低基准率下失衡
-            threshold, best_f1 = search_threshold(y_valid, prob_valid)
+            # 表单候选减少误报，同时保留 F1 模式供同集比较。数仓模型沿用原 F1 口径。
+            if profile == "form":
+                points = form_operating_points(y_valid, prob_valid, y_test, prob_test)
+                report["operating_points"] = points
+                report["threshold_policy"] = "conservative"
+                threshold = points["conservative"]["valid"]["threshold"]
+                best_f1 = points["f1"]["valid"]["f1"]
+                payload["threshold_policy"] = report["threshold_policy"]
+                report["splits"]["test"] = points["conservative"]["test"]
+                report["splits"]["valid"] = points["conservative"]["valid"]
+            else:
+                threshold, best_f1 = search_threshold(y_valid, prob_valid)
+                report["splits"]["test"] = classification_metrics(y_test, prob_test, threshold)
+                report["splits"]["valid"] = classification_metrics(y_valid, prob_valid, threshold)
             payload.update(bias=bias, threshold=threshold)
             report["calibration"] = {"bias": round(bias, 4), "threshold": threshold,
                                      "base_rate": round(base_rate, 4),
                                      "valid_best_f1": round(best_f1, 4)}
-            report["splits"]["test"] = classification_metrics(y_test, prob_test, threshold)
-            report["splits"]["valid"] = classification_metrics(y_valid, prob_valid, threshold)
             report["splits"]["train"] = classification_metrics(y_train, prob_train, threshold)
         else:  # 三级分类：基线下用概率分段
             payload = {"kind": "baseline", "task": task}
@@ -647,11 +753,11 @@ def train_and_evaluate(periods: list[str], task: str = "cls15", algo: str = "aut
     # ---------------- 写模型版本与指标 ----------------
     version = ModelVersion(
         model_ver=model_ver, task=task, algo=algo_name,
-        feature_set=",".join(FEATURE_SPECS), train_range=report["train_range"],
+        feature_set=",".join(feature_names), train_range=report["train_range"],
         test_range=report["test_range"],
         params_json=json.dumps({**params, "seed": seed}, ensure_ascii=False),
         metrics_json=json.dumps(report["splits"], ensure_ascii=False),
-        artifact_path=artifact_path, is_online=0, seed=seed, created_by=operator,
+        artifact_path=Path(artifact_path).name, is_online=0, seed=seed, created_by=operator,
         created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
     db.session.add(version)
@@ -685,7 +791,7 @@ def predict_and_store(period: str, model_ver: str | None = None,
     df = engine.read("dws_flight_features", filters=[("year_month", "=", period)])
     if df.empty:
         raise ValueError(f"{period} 无特征宽表数据")
-    result = predict_frame(_feature_frame(df), model_ver=model_ver)
+    result = predict_frame(df, model_ver=model_ver)
     prob = result["prob"]
     contrib = result["contrib"]
 

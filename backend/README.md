@@ -282,9 +282,21 @@ avg_delay   = operated 的 DepDelay 均值（保留负值，提前起飞计负�
 ## 十四、测试与验收
 
 ```powershell
-python -m pytest tests -q                 # 116 passed（含建模依赖）
+python -m pytest tests -q                 # 独立 SQLite 和临时数仓，无需构建前端
 python scripts/smoke_test.py --base http://127.0.0.1:5000   # 60 passed
 ```
+
+配置了 LightGBM 和完整数仓时，可复现表单版候选模型的留出测试。
+
+```powershell
+python -m flask --app run.py train --profile form --periods 2024-10,2024-11,2024-12 --sample-per-month 50000 --no-predict
+```
+
+表单模型使用日期、计划时刻和机场之间的大圆距离，并在观测可用时加入计划起飞前的气象数据。缺测的气象特征保留为空。训练、阈值校准和留出测试按互不重叠的日期切分。数据管理的「模型验证」会读取 `instance/form-model-validation.json`，也可通过 `FORM_MODEL_REPORT` 指定路径。命令会登记候选版本，有效的线上模型由管理员单独选择。
+
+表单候选默认使用少误报阈值。在验证集上保持召回率至少 40%，再选择准确率最高的阈值。报告在同一留出集上对比少误报阈值、F1 优先阈值和全部判为准点的基线，并给出误报与漏报架次。
+
+总览、趋势、网络和逐班查询会返回月份覆盖情况。演示明细的抽样月份由数仓目录下的 `_sampled_flight_months.json` 标明。新提交的后台作业每 30 秒更新心跳。心跳超时后，作业标为「已中断」，管理员可用保存的提交参数重新提交。
 
 覆盖：清洗规则正反例、ISD 编码解析（含向量化与标量一致性）、指标口径、数仓读写幂等、认证与四角色权限、参数校验、上传白名单、周期拦截、统一响应结构、数据字典生成。
 

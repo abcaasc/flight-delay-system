@@ -60,6 +60,7 @@ test("prediction handles service failure, retry, demo mode and an obsolete respo
 
 test("rankings show localized airport names across months and share labels with the filter", async ({ page }) => {
   await page.goto("/");
+  await page.getByLabel("统计月份", { exact: true }).fill("2015-01");
   const rows = page.locator(".rank-row");
   await expect(rows.first()).toContainText("关岛国际机场");
   await expect(rows.nth(1)).toContainText("俄勒冈西南地区机场");

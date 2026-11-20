@@ -76,7 +76,11 @@ def export():
         "风速(m/s)": r.get("wind_max_ms"),
         "航班代理键": r.get("flight_sk"),
     } for r in result["items"]]
-    return csv_response(rows, "flights")
+    coverage = result["coverage"]
+    response = csv_response(rows, "flights_sample" if coverage["sampled_months"] else "flights")
+    response.headers["X-Missing-Months"] = ",".join(coverage["missing_months"])
+    response.headers["X-Sampled-Months"] = ",".join(coverage["sampled_months"])
+    return response
 
 
 @bp.get("/<flight_sk>")

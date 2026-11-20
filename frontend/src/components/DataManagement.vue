@@ -32,14 +32,20 @@ async function login() {
   } finally { password.value = ""; signingIn.value = false; }
 }
 const statusLabels: Record<string,string> = { queued: "排队中", running: "运行中", success: "成功",
-  failed: "失败", blocked: "受阻", cancelled: "已取消", skipped: "已跳过" };
-interface Job { job_id: string; job_name: string; period: string; started_at: string; status: string; err_msg: string; err_code: string; progress: number }
+  failed: "失败", blocked: "受阻", cancelled: "已取消", skipped: "已跳过", interrupted: "已中断" };
+interface Job { job_id: string; job_name: string; period: string; started_at: string; status: string; err_msg: string; err_code: string; progress: number; retryable: boolean }
 interface Failure { id: number; dataset: string; period: string; file_name: string; err_msg: string; err_code: string; attempts: number }
 interface Quality { rows: { ods: number; dwd: number; kept_rate: number | null }; drop_reasons: Record<string,number>; flag_reasons: Record<string,number>; audits: {id:number; file_name:string; status:string; drop_rows:number; err_code:string}[] }
 interface Metrics { support: number; auc: number | null; recall: number; precision: number; f1:number; threshold: number }
 interface Pair { full: Metrics; no_chain: Metrics }
-interface Report { model_ver: string; current: boolean; generated_at: string; holdout: Pair & {test_range: string[]};
-  folds: (Pair & {train: string[]; validation:string; test:string})[] }
+interface OperatingMetrics extends Metrics { accuracy: number; confusion: { fp: number; fn: number } }
+interface FormReport { model_ver: string; current: boolean; train_range: string; valid_range: string;
+  test_range: string; sample_per_month: number; splits: { test: Metrics & { accuracy?: number } };
+  observed_weather?: { validation: number; test: number };
+  operating_points?: { validation_recall_floor: number; f1: { test: OperatingMetrics };
+    conservative: { test: OperatingMetrics }; always_ontime: OperatingMetrics } }
+interface Report { model_ver: string; current: boolean; generated_at: string; holdout?: Pair & {test_range: string[]};
+  folds?: (Pair & {train: string[]; validation:string; test:string})[]; form: FormReport | null }
 const allowed = computed(() => props.mode === "api" && !!session.value);
 const validMonth = computed(() => /^(201[5-9]|202[0-4])-(0[1-9]|1[0-2])$/.test(month.value));
 const token = () => session.value?.token || "";
@@ -70,6 +76,28 @@ function refresh() {
   else loadReport();
 }
 const monthNeeded = computed(() => tab.value === "数据质量" || (tab.value === "作业记录" && jobScope.value === "month"));
+const retrying = ref(false);
+const retryMessage = ref("");
+const retryFailed = ref(false);
+async function retryJob(job: Job) {
+  retrying.value = true;
+  retryMessage.value = "";
+  retryFailed.value = false;
+  try {
+    const result = await apiRequest<{ job_id: string }>(
+      `ingest/jobs/${encodeURIComponent(job.job_id)}/retry`,
+      AbortSignal.any([controller.signal, AbortSignal.timeout(20000)]),
+      { method: "POST", headers: { Authorization: "Bearer " + token() } });
+    retryMessage.value = `已提交作业 ${result.job_id}`;
+    jobStatus.value = "";
+    loadJobs();
+  } catch (e) {
+    retryFailed.value = true;
+    retryMessage.value = e instanceof Error ? e.message : "作业重试失败";
+  } finally {
+    retrying.value = false;
+  }
+}
 const metric = (v:number | null) => v == null ? "—" : v.toFixed(3);
 </script>
 
@@ -101,10 +129,13 @@ const metric = (v:number | null) => v == null ? "—" : v.toFixed(3);
       <p v-else-if="busy" class="work-message" role="status">正在读取{{ tab }}…</p>
       <p v-else-if="error" class="work-message" role="alert">{{ error.message }} <button class="text-button" @click="refresh">重试</button></p>
       <template v-else-if="tab === '作业记录' && jobs">
+        <p v-if="retryMessage" class="work-message" :role="retryFailed ? 'alert' : 'status'">{{ retryMessage }}</p>
         <p class="work-message">{{ jobs.items.length ? "按创建时间倒序，最多显示最近 100 项。" : "当前范围没有作业记录。" }}</p>
         <div v-if="jobs.items.length" class="table-scroll"><table><thead><tr><th>作业</th><th>数据周期</th><th>开始时间</th><th>状态</th><th>进度 / 错误</th></tr></thead>
           <tbody><tr v-for="j in jobs.items" :key="j.job_id"><td :title="j.job_id">{{ j.job_name }}</td><td>{{ j.period || "—" }}</td><td>{{ j.started_at || "—" }}</td>
-            <td>{{ statusLabels[j.status] || j.status }}</td><td class="reason-cell">{{ j.err_msg || j.err_code || j.progress + "%" }}</td></tr></tbody></table></div>
+            <td>{{ statusLabels[j.status] || j.status }}</td><td class="reason-cell">{{ j.err_msg || j.err_code || j.progress + "%" }}
+              <button v-if="j.retryable && session.user.role === 'admin'" class="text-button" :disabled="retrying" @click="retryJob(j)">重新提交</button>
+            </td></tr></tbody></table></div>
       </template>
       <template v-else-if="tab === '数据质量' && quality">
         <dl class="quality-metrics"><div><dt>原始航班</dt><dd>{{ number(quality.rows.ods) }}</dd></div><div><dt>清洗后航班</dt><dd>{{ number(quality.rows.dwd) }}</dd></div>
@@ -122,6 +153,39 @@ const metric = (v:number | null) => v == null ? "—" : v.toFixed(3);
           <tbody><tr v-for="f in failures.items" :key="f.id"><td>{{ f.period }}</td><td>{{ f.dataset }} · {{ f.file_name }}</td><td>{{ f.attempts }}</td><td class="reason-cell">{{ f.err_msg || f.err_code }}</td></tr></tbody></table></div>
       </template>
       <template v-else-if="tab === '模型验证' && report">
+        <template v-if="report.form">
+          <div class="report-intro"><h3>表单模型留出测试 · {{ report.form.current ? "当前使用" : "候选" }}</h3>
+            <p>{{ report.form.model_ver }} · 使用日期、计划时刻和机场坐标。</p>
+            <p>训练 {{ report.form.train_range }} · 校准 {{ report.form.valid_range }} · 测试 {{ report.form.test_range }} · {{ number(report.form.splits.test.support) }} 班</p>
+            <p v-if="report.form.observed_weather">留出集中 {{ number(report.form.observed_weather.test) }} 班有起飞前气象观测，其余按缺测处理。</p>
+            <p v-if="report.form.sample_per_month">每月最多抽取 {{ number(report.form.sample_per_month) }} 班进入训练、校准和测试的日期切分。</p>
+          </div>
+          <div v-if="report.form.operating_points" class="report-intro">
+            <p>两种阈值均在验证集选出。少误报阈值在验证集召回率至少 {{ percent(report.form.operating_points.validation_recall_floor, 0) }}% 的条件下最大化准确率。下表使用同一留出集。</p>
+          </div>
+          <div v-if="report.form.operating_points" class="table-scroll">
+            <table><thead><tr><th>判定方式</th><th>阈值</th><th>准确率</th><th>精确率</th><th>召回率</th><th>F1</th><th>误报</th><th>漏报</th></tr></thead>
+              <tbody>
+                <tr v-for="(m, label) in {'少误报': report.form.operating_points.conservative.test, 'F1 优先': report.form.operating_points.f1.test}" :key="label">
+                  <th scope="row">{{ label }}</th><td>{{ percent(m.threshold) }}%</td><td>{{ percent(m.accuracy) }}%</td>
+                  <td>{{ percent(m.precision) }}%</td><td>{{ percent(m.recall) }}%</td><td>{{ metric(m.f1) }}</td>
+                  <td>{{ number(m.confusion.fp) }}</td><td>{{ number(m.confusion.fn) }}</td>
+                </tr>
+                <tr>
+                  <th scope="row">全部判为准点</th><td>—</td><td>{{ percent(report.form.operating_points.always_ontime.accuracy) }}%</td>
+                  <td>—</td><td>0.0%</td><td>0.000</td><td>0</td><td>{{ number(report.form.operating_points.always_ontime.confusion.fn) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="work-message">表单模型 AUC {{ metric(report.form.splits.test.auc) }}</p>
+          </div>
+          <div v-else class="table-scroll"><table><thead><tr><th>AUC</th><th>准确率</th><th>召回率</th><th>精确率</th><th>F1</th><th>判定阈值</th></tr></thead>
+            <tbody><tr><td>{{ metric(report.form.splits.test.auc) }}</td>
+              <td>{{ report.form.splits.test.accuracy == null ? "—" : percent(report.form.splits.test.accuracy) + "%" }}</td><td>{{ percent(report.form.splits.test.recall) }}%</td>
+              <td>{{ percent(report.form.splits.test.precision) }}%</td><td>{{ metric(report.form.splits.test.f1) }}</td>
+              <td>{{ percent(report.form.splits.test.threshold) }}%</td></tr></tbody></table></div>
+        </template>
+        <template v-if="report.holdout">
         <div class="report-intro"><h3>{{ report.current ? "上线模型留出测试" : "历史模型留出测试" }}</h3>
           <p>{{ report.model_ver }} · {{ report.holdout.test_range.join(" 至 ") }} · {{ number(report.holdout.full.support) }} 班</p></div>
         <div class="table-scroll"><table><thead><tr><th>输入条件</th><th>AUC</th><th>召回率</th><th>精确率</th><th>F1</th><th>判定阈值</th></tr></thead>
@@ -131,6 +195,7 @@ const metric = (v:number | null) => v == null ? "—" : v.toFixed(3);
         <div class="table-scroll"><table><thead><tr><th>训练月份</th><th>验证月</th><th>测试月</th><th>测试航班</th><th>数仓 AUC / 召回率</th><th>缺链 AUC / 召回率</th></tr></thead>
           <tbody><tr v-for="fold in report.folds" :key="fold.test"><td>{{ fold.train.join(" 至 ") }}</td><td>{{ fold.validation }}</td><td>{{ fold.test }}</td><td>{{ number(fold.full.support) }}</td>
             <td>{{ metric(fold.full.auc) }} / {{ percent(fold.full.recall) }}%</td><td>{{ metric(fold.no_chain.auc) }} / {{ percent(fold.no_chain.recall) }}%</td></tr></tbody></table></div>
+        </template>
       </template>
     </Card>
   </template>

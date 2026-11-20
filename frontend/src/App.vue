@@ -55,6 +55,8 @@ import {
   demoAirports,
   demoDashboard,
   fetchDashboard,
+  apiRequest,
+  type Coverage,
   downloadCsv,
   percent,
   number,
@@ -110,6 +112,12 @@ const data = ref<DashboardData | null>(null),
   error = ref(""),
   loading = ref(false),
   updated = ref("");
+const lastReadyMonth = { api: "", demo: "" };
+const fallbackMonth = ref("");
+const fallbackMonthLabel = computed(() => {
+  const [year, monthNumber] = fallbackMonth.value.split("-");
+  return `${year} 年 ${Number(monthNumber)} 月`;
+});
 const airportOptions = ref<{ id: string; name: string }[]>(demoAirports),
   fullscreen = ref(false);
 const reducedMotion = useReducedMotion();
@@ -199,6 +207,7 @@ async function load() {
   error.value = "";
   loading.value = true;
   updated.value = "";
+  fallbackMonth.value = lastReadyMonth[mode.value];
   const timeout = setTimeout(() => activeController.abort("timeout"), 15000);
   try {
     const result =
@@ -211,6 +220,7 @@ async function load() {
           );
     if (id !== requestId) return;
     data.value = result;
+    lastReadyMonth[mode.value] = month.value;
     airportOptions.value = result.nodes
       .map((n) => ({ id: n.id, name: airportName(n.id, n.name) }))
       .sort((a, b) => a.id.localeCompare(b.id));
@@ -229,6 +239,12 @@ async function load() {
       : e instanceof Error
         ? e.message
         : "读取失败，请重试";
+    if (mode.value === "api" && !fallbackMonth.value && !activeController.signal.aborted) {
+      apiRequest<{ dashboard: Coverage }>("system/coverage", activeController.signal)
+        .then(({ dashboard }) => {
+          if (id === requestId) fallbackMonth.value = dashboard.available_months.at(-1) ?? "";
+        }).catch(() => {});
+    }
   } finally {
     clearTimeout(timeout);
     if (id === requestId) loading.value = false;
@@ -282,8 +298,8 @@ function openValidation() {
   page.value = "数据管理";
 }
 function restoreMonth() {
-  if (month.value !== "2015-01" || airport.value) {
-    month.value = "2015-01";
+  if (fallbackMonth.value && (month.value !== fallbackMonth.value || airport.value)) {
+    month.value = fallbackMonth.value;
     airport.value = "";
   } else load();
 }
@@ -497,6 +513,9 @@ async function toggleFullscreen() {
             <span v-if="updated">· 更新于 {{ updated }}</span></span
           >
         </div>
+        <p v-if="showOverview && data?.missingMonths?.length" class="work-message" role="status">
+          当前仅展示部分数据，缺少 {{ data.missingMonths.join("、") }} 的统计分区。
+        </p>
         <div v-if="showOverview" class="metrics" :aria-busy="loading">
           <article v-for="m in metrics" :key="m.label" class="card metric-card">
             <div class="metric-label">
@@ -541,8 +560,8 @@ async function toggleFullscreen() {
             <div class="state-actions">
               <button class="button primary" @click="load">
                 <RefreshCw :size="15" />重新读取</button
-              ><button class="button" @click="restoreMonth">
-                查看 2015 年 1 月</button
+              ><button v-if="fallbackMonth && (fallbackMonth !== month || airport)" class="button" @click="restoreMonth">
+                查看 {{ fallbackMonthLabel }}</button
               ><button class="text-button" @click="mode = 'demo'">
                 体验模拟数据 <ArrowRight :size="14" />
               </button>

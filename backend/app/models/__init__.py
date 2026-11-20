@@ -141,7 +141,7 @@ class JobRun(Base):
     mode: Mapped[str] = mapped_column(String(16), default="incremental", comment="full/incremental")
     engine: Mapped[str] = mapped_column(String(16), default="pandas", comment="spark/pandas")
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True,
-                                        comment="queued/running/success/failed/blocked/cancelled")
+                                        comment="queued/running/success/failed/blocked/cancelled/interrupted")
     progress: Mapped[float] = mapped_column(Float, default=0.0, comment="0-100")
     current_file: Mapped[str] = mapped_column(String(256), default="")
     total_files: Mapped[int] = mapped_column(Integer, default=0)
@@ -183,6 +183,15 @@ class JobRun(Base):
             "started_at": self.started_at, "finished_at": self.finished_at,
             "elapsed_sec": round(self.elapsed_sec or 0, 1),
         }
+
+
+# ============================================================ 作业心跳
+class JobLease(Base):
+    __tablename__ = "sys_job_lease"
+
+    job_id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    request_json: Mapped[str] = mapped_column(Text, default="")
 
 
 # ============================================================ 数据接入

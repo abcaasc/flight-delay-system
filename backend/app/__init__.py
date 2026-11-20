@@ -31,6 +31,9 @@ def create_app(config_object: type = Config) -> Flask:
     # ---------------- 数据库 ----------------
     with app.app_context():
         db.create_all()
+        from app.services.job_runtime import reconcile_jobs
+
+        reconcile_jobs()
 
     @app.teardown_appcontext
     def _close_session(exc=None):
@@ -123,6 +126,7 @@ def create_app(config_object: type = Config) -> Flask:
         log.info("已托管前端静态资源：%s", dist)
     else:
         app.add_url_rule("/", "index", index)
+        app.add_url_rule("/api/v1", "api_index", index)
 
     @app.get("/api/v1/system/endpoints")
     def endpoints():

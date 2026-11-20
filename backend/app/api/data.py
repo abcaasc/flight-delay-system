@@ -105,6 +105,14 @@ def job_status(job_id: str):
     return ok(ingest.job_status(job_id))
 
 
+@bp.post("/ingest/jobs/<job_id>/retry")
+@require_role("admin")
+def retry_job(job_id: str):
+    result = ingest.retry_job(job_id, current_identity()["username"])
+    write_audit("job_retry", job_id, f"新作业 {result['job_id']}")
+    return ok(result)
+
+
 @bp.get("/ingest/failed")
 @require_role("admin")
 def dead_letters():

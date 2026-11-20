@@ -11,6 +11,8 @@
 
 第一次使用可打开[航迹使用指南](USER_GUIDE.md)，按页面操作查看航班、延误原因和预测结果。
 
+[开发进度、验收记录与模型后续计划](backend/docs/后端优化与验证说明.md)
+
 ---
 
 ## 一、功能一览
@@ -138,7 +140,7 @@ flight-delay-system/
 │   │   ├── models/             # SQLAlchemy 业务表
 │   │   └── utils/              # 响应、参数、JWT/RBAC、日志
 │   ├── scripts/                # 巡检 / 冒烟 / 演示数据导出
-│   ├── tests/                  # 116 个 pytest 用例
+│   ├── tests/                  # 后端单元测试和回归测试
 │   ├── docs/                   # 数据字典、接口清单、部署运维、测试用例
 │   └── data/
 │       ├── demo/warehouse/     # ★ 入库的瘦身演示数仓

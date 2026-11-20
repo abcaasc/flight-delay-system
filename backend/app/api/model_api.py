@@ -5,7 +5,7 @@ import json
 import numpy as np
 import pandas as pd
 from flask import Blueprint
-from app.config import BASE_DIR
+from app.config import Config
 
 from app.extensions import db
 from app.models import ModelVersion
@@ -21,12 +21,17 @@ bp = Blueprint("models", __name__, url_prefix="/api/v1/model")
 @bp.get("/backtest")
 @require_role("ops")
 def backtest():
-    path = BASE_DIR / "instance" / "rolling-backtest.json"
-    if not path.is_file():
+    rolling = Config.ROLLING_BACKTEST_REPORT
+    form = Config.FORM_MODEL_REPORT
+    if not rolling.is_file() and not form.is_file():
         raise ApiError(ErrCode.DATA_NOT_READY, "尚未生成时间回测报告")
-    report = json.loads(path.read_text(encoding="utf-8"))
-    active = db.session.query(ModelVersion.model_ver).filter_by(is_online=1, task="cls15").first()
-    return ok({**report, "current": bool(active and active[0] == report["model_ver"])})
+    report = json.loads(rolling.read_text(encoding="utf-8")) if rolling.is_file() else {}
+    candidate = json.loads(form.read_text(encoding="utf-8")) if form.is_file() else None
+    active = model_service.online_model()
+    active_version = active["meta"]["model_ver"] if active else model_service.baseline_version()
+    if candidate:
+        candidate["current"] = active_version == candidate["model_ver"]
+    return ok({**report, "current": active_version == report.get("model_ver"), "form": candidate})
 
 
 @bp.get("/versions")
@@ -39,8 +44,9 @@ def versions():
             raise ApiError(ErrCode.PARAM_INVALID, f"task 只能是 {list(model_service.TASKS)}")
         query = query.filter(ModelVersion.task == task)
     rows = query.order_by(ModelVersion.id.desc()).limit(params.get_int("limit", 50, minimum=1, maximum=200)).all()
+    active = model_service.online_model() if not task or task == "cls15" else None
     return ok({"items": [r.to_dict() for r in rows],
-               "online": next((r.model_ver for r in rows if r.is_online), None),
+               "online": active["meta"]["model_ver"] if active else None,
                "tasks": {k: v["name"] for k, v in model_service.TASKS.items()}})
 
 
@@ -165,7 +171,8 @@ def set_online():
     row = db.session.query(ModelVersion).filter_by(model_ver=model_ver).first()
     if row is None:
         raise ApiError(ErrCode.NOT_FOUND, f"模型版本不存在：{model_ver}")
-    if row.task != "cls15" or not model_service.online_model(model_ver):
+    payload = model_service.online_model(model_ver) if row.task == "cls15" else None
+    if not payload or payload.get("task") != "cls15":
         raise ApiError(ErrCode.PARAM_INVALID, "在线延误概率预测需要有效的 cls15 模型产物")
     db.session.query(ModelVersion).update({ModelVersion.is_online: 0})
     row.is_online = 1

@@ -144,7 +144,11 @@ def register_commands(app: Flask) -> None:
     @click.option("--task", default="cls15", type=click.Choice(["cls15", "level3", "reg"]))
     @click.option("--predict/--no-predict", default=True, help="训练后是否批量预测")
     @click.option("--online", is_flag=True, default=False, help="训练完直接上线（等价 admin 审批）")
-    def train(periods: str | None, task: str, predict: bool, online: bool):
+    @click.option("--profile", default="warehouse", type=click.Choice(["warehouse", "form"]))
+    @click.option("--sample-per-month", default=0, type=click.IntRange(min=0),
+                  help="表单模型每月随机抽样条数，0 表示全量")
+    def train(periods: str | None, task: str, predict: bool, online: bool,
+              profile: str, sample_per_month: int):
         """训练 + 评测 + 批量预测（可选上线）。"""
         from app.extensions import db
         from app.models import ModelVersion
@@ -153,7 +157,20 @@ def register_commands(app: Flask) -> None:
         targets = _split(periods) or engine.BaseEngine.available_periods("dws_flight_features")[-3:]
         if not targets:
             raise click.ClickException("特征宽表为空，请先跑 etl")
-        report = model_service.train_and_evaluate(targets, task=task, operator="cli")
+        if sample_per_month and profile != "form":
+            raise click.ClickException("--sample-per-month 仅用于表单模型")
+        report = model_service.train_and_evaluate(
+            targets, task=task, operator="cli",
+            params={"feature_profile": profile, "sample_per_month": sample_per_month})
+        if profile == "form":
+            import os
+            from tempfile import NamedTemporaryFile
+
+            path = Config.FORM_MODEL_REPORT
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as file:
+                json.dump(report, file, ensure_ascii=False, indent=2)
+            os.replace(file.name, path)
         click.echo(json.dumps(report, ensure_ascii=False, indent=2, default=str))
         if online:
             db.session.query(ModelVersion).update({ModelVersion.is_online: 0})
@@ -164,7 +181,8 @@ def register_commands(app: Flask) -> None:
                 click.secho(f"已上线：{report['model_ver']}", fg="green")
         if predict:
             for period in targets[-1:]:
-                click.echo(json.dumps(model_service.predict_and_store(period, operator="cli"),
+                version = report["model_ver"] if task == "cls15" else None
+                click.echo(json.dumps(model_service.predict_and_store(period, model_ver=version, operator="cli"),
                                       ensure_ascii=False, indent=2, default=str))
 
     @app.cli.command("pipeline")

@@ -12,6 +12,9 @@ _TMP = tempfile.mkdtemp(prefix="fds-test-")
 os.environ["WAREHOUSE_ROOT"] = os.path.join(_TMP, "warehouse")
 os.environ["STAGING_ROOT"] = os.path.join(_TMP, "staging")
 os.environ["MODEL_ROOT"] = os.path.join(_TMP, "models")
+os.environ["FRONTEND_DIST"] = os.path.join(_TMP, "no-frontend")
+os.environ["ROLLING_BACKTEST_REPORT"] = os.path.join(_TMP, "rolling-backtest.json")
+os.environ["FORM_MODEL_REPORT"] = os.path.join(_TMP, "form-model-validation.json")
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMP}/test.db"
 os.environ["QUERY_ENGINE"] = "pandas"
 os.environ["REDIS_URL"] = ""

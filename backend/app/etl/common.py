@@ -12,6 +12,7 @@ import pandas as pd
 
 from app.extensions import db
 from app.models import FileManifest, IngestAudit, IngestFailed, JobRun
+from app.services.job_runtime import JobHeartbeat
 from app.utils.logger import JobLogger, get_logger
 
 log = get_logger(__name__)
@@ -101,6 +102,7 @@ class JobContext:
     _t0: float = field(default_factory=time.time)
     _stage_t0: float = field(default_factory=time.time)
     _logger: JobLogger | None = None
+    _heartbeat: JobHeartbeat | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         self._logger = JobLogger(self.job_name, self.job_id)
@@ -141,12 +143,16 @@ class JobContext:
     # ---------------- 落库 ----------------
     def persist(self, status: str | None = None, err_code: str = "", err_msg: str = "") -> None:
         """把当前状态写入 sys_job_run（页面每 2 秒轮询看到的就是这条记录）。"""
+        heartbeat = None
         try:
             row = db.session.query(JobRun).filter_by(job_id=self.job_id).first()
             if row is None:
                 row = JobRun(job_id=self.job_id, job_name=self.job_name,
                              started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 db.session.add(row)
+                if status == "running":
+                    heartbeat = JobHeartbeat(self.job_id)
+                    heartbeat.register()
             row.dataset = self.dataset
             row.period = self.period
             row.mode = self.mode
@@ -169,6 +175,9 @@ class JobContext:
             if status in {"success", "failed", "blocked", "cancelled"}:
                 row.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             db.session.commit()
+            if heartbeat is not None:
+                heartbeat.start()
+                self._heartbeat = heartbeat
         except Exception as exc:  # 落库失败不能打断数据流程
             db.session.rollback()
             log.warning("作业 %s 状态落库失败：%s", self.job_id, exc)
@@ -177,6 +186,8 @@ class JobContext:
         elapsed = time.time() - self._t0
         self._logger.finish(self.rows_in, self.rows_out, elapsed, self.drops.as_dict())
         self.persist(status=status, err_code=err_code, err_msg=err_msg)
+        if self._heartbeat is not None:
+            self._heartbeat.stop()
         return {
             "job_id": self.job_id,
             "job_name": self.job_name,

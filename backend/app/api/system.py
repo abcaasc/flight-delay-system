@@ -60,6 +60,18 @@ def freshness():
     })
 
 
+@bp.get("/coverage")
+@optional_auth
+def coverage():
+    """返回当前可选月份和逐班明细的覆盖情况。"""
+    months = set(engine.BaseEngine.available_periods("dws_airport_hourly"))
+    return ok({
+        "dashboard": stats.month_coverage(months, "dws_airport_hourly", "dws_route_daily"),
+        "flights": stats.month_coverage(
+            months.union(engine.BaseEngine.available_periods("dwd_flight_detail")), "dwd_flight_detail"),
+    })
+
+
 @bp.get("/job/stats")
 @require_role("ops")
 def job_stats():

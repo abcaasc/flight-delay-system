@@ -43,6 +43,12 @@ export interface DashboardData {
   links: RouteLink[];
   trend: TrendPoint[];
   source: "api" | "demo";
+  missingMonths?: string[];
+}
+export interface Coverage {
+  available_months: string[];
+  missing_months: string[];
+  sampled_months: string[];
 }
 export type DataSource = DashboardData["source"];
 export type MapMetric = "delay_rate" | "flights";
@@ -100,11 +106,11 @@ export async function fetchDashboard(
     ...(airport ? { airports: airport } : {}),
   });
   const [overview, network] = await Promise.all([
-    apiRequest<{ kpi: { kpi: Kpi }; trend: { points: TrendPoint[] } }>(
+    apiRequest<{ kpi: { kpi: Kpi; coverage: Coverage }; trend: { points: TrendPoint[] } }>(
       `overview?${params}`,
       signal,
     ),
-    apiRequest<{ nodes: AirportNode[]; links: RouteLink[] }>(
+    apiRequest<{ nodes: AirportNode[]; links: RouteLink[]; coverage: Coverage }>(
       `network?${params}&top_routes=1000`,
       signal,
     ),
@@ -115,6 +121,9 @@ export async function fetchDashboard(
     nodes: network.nodes,
     links: network.links,
     source: "api",
+    missingMonths: [...new Set([
+      ...(overview.kpi.coverage?.missing_months ?? []), ...(network.coverage?.missing_months ?? []),
+    ])],
   };
 }
 

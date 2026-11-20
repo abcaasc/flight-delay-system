@@ -217,7 +217,8 @@ class BaseEngine:
             return []
         values = []
         for child in root.iterdir():
-            if child.is_dir() and child.name.startswith(f"{part_col}="):
+            if (child.is_dir() and child.name.startswith(f"{part_col}=")
+                    and any(child.glob("*.parquet"))):
                 values.append(child.name.split("=", 1)[1])
         return sorted(values)
 
@@ -270,46 +271,77 @@ def _parquet_rows(_root, table: TableDef, value: str | None) -> int:
 class PandasEngine(BaseEngine):
     name = "pandas"
 
+    def _dataset(self, table, source, filters):
+        import pyarrow as pa
+        import pyarrow.dataset as ds
+
+        partitioning = "hive"
+        if table.partition_col:
+            partitioning = ds.partitioning(
+                pa.schema([pa.field(table.partition_col, pa.string())]), flavor="hive")
+        dataset = ds.dataset(source, format="parquet", partitioning=partitioning)
+        for col, op, value in filters:
+            field = ds.field(col)
+            if op in ("=", "=="):
+                condition = field == value
+            elif op == "!=":
+                condition = field != value
+            elif op == ">":
+                condition = field > value
+            elif op == ">=":
+                condition = field >= value
+            elif op == "<":
+                condition = field < value
+            elif op == "<=":
+                condition = field <= value
+            elif op == "in":
+                condition = field.isin(value)
+            elif op == "not in":
+                condition = ~field.isin(value)
+            else:
+                continue
+            dataset = dataset.filter(condition)
+        return dataset
+
+    @_warehouse_locked
+    def page(self, table_name, columns, filters, sort_by, ascending, offset, size):
+        import pyarrow.compute as pc
+        import pyarrow.dataset as ds
+
+        table = get_table(table_name)
+        # 只从命中的月份建立 Dataset，避免分页时扫描所有历史文件。
+        root = self.table_dir(table_name)
+        prepared = prepare_filters(table_name, filters)
+        months = next(value for col, op, value in prepared if col == table.partition_col and op == "in")
+        files = [path.as_posix() for month in months
+                 for path in _partition_path(root, table.partition_col, month).glob("*.parquet")]
+        if not files:
+            return _empty_frame(table), 0
+        dataset = self._dataset(table, files, prepared)
+        key = table.primary_key
+        sort_by = sort_by if sort_by in dataset.schema.names else key
+        keys = dataset.to_table(columns=list(dict.fromkeys((sort_by, key))))
+        total = keys.num_rows
+        if offset >= total:
+            return _empty_frame(table), total
+        order = [(sort_by, "ascending" if ascending else "descending")]
+        if sort_by != key:
+            order.append((key, "ascending"))
+        indices = pc.sort_indices(keys, sort_keys=order).slice(offset, size)
+        ids = keys[key].take(indices).to_pylist()
+        wanted = [col for col in columns if col in dataset.schema.names]
+        rows = dataset.filter(ds.field(key).isin(ids)).to_table(columns=wanted).to_pandas()
+        if len(rows) != len(ids) or rows[key].duplicated().any():
+            return dataset.to_table(columns=wanted).take(indices).to_pandas(), total
+        return rows.set_index(key).loc[ids].reset_index(), total
+
     @_warehouse_locked
     def read(self, table_name: str, columns=None, filters=None, limit=None) -> pd.DataFrame:
         table = get_table(table_name)
         root = self.require(table_name)
         filters = prepare_filters(table_name, filters)
         try:
-            import pyarrow as pa
-            import pyarrow.dataset as ds
-
-            # 显式声明分区列类型为 string：否则 pyarrow 会把 year=2015 推断成 int32，
-            # 与字符串过滤器冲突（"equal has no kernel matching (int32, string)"）。
-            partitioning = "hive"
-            if table.partition_col:
-                partitioning = ds.partitioning(
-                    pa.schema([pa.field(table.partition_col, pa.string())]), flavor="hive")
-            dataset = ds.dataset(str(root), format="parquet", partitioning=partitioning)
-            expr = None
-            for col, op, value in filters:
-                field = ds.field(col)
-                if op in ("=", "=="):
-                    cond = field == value
-                elif op == "!=":
-                    cond = field != value
-                elif op == ">":
-                    cond = field > value
-                elif op == ">=":
-                    cond = field >= value
-                elif op == "<":
-                    cond = field < value
-                elif op == "<=":
-                    cond = field <= value
-                elif op == "in":
-                    cond = field.isin(list(value))
-                elif op == "not in":
-                    cond = ~field.isin(list(value))
-                else:
-                    continue
-                expr = cond if expr is None else (expr & cond)
-            if expr is not None:
-                dataset = dataset.filter(expr)
+            dataset = self._dataset(table, str(root), filters)
             wanted = [c for c in (columns or []) if c in set(dataset.schema.names)] or None
             arrow_table = dataset.head(limit, columns=wanted) if limit is not None else dataset.to_table(columns=wanted)
             df = arrow_table.to_pandas()
@@ -422,7 +454,7 @@ class SparkEngine(BaseEngine):
 
         self.spark = build_spark()
 
-    def read(self, table_name: str, columns=None, filters=None, limit=None) -> pd.DataFrame:
+    def _filtered(self, table_name, filters):
         from pyspark.sql import functions as F
 
         root = self.require(table_name)
@@ -446,7 +478,30 @@ class SparkEngine(BaseEngine):
             elif op == "in":
                 sdf = sdf.filter(field.isin(list(value)))
             elif op == "not in":
-                sdf = sdf.filter(~field.isin(list(value)))
+                sdf = sdf.filter(field.isNull() | ~field.isin(list(value)))
+        return sdf
+
+    def page(self, table_name, columns, filters, sort_by, ascending, offset, size):
+        from pyspark.sql import functions as F
+        from pyspark.sql.window import Window
+
+        sdf = self._filtered(table_name, filters)
+        total = sdf.count()
+        if offset >= total:
+            return _empty_frame(get_table(table_name)), total
+        key = get_table(table_name).primary_key
+        field = F.col(sort_by if sort_by in sdf.columns else key)
+        order = field.asc_nulls_last() if ascending else field.desc_nulls_last()
+        order = [order, F.col(key).asc()]
+        wanted = [col for col in columns if col in sdf.columns]
+        ordered = sdf.select(*wanted).orderBy(*order).limit(offset + size)
+        if offset:
+            ordered = (ordered.withColumn("_page_row", F.row_number().over(Window.orderBy(*order)))
+                       .filter(F.col("_page_row") > offset).orderBy("_page_row").drop("_page_row"))
+        return ordered.toPandas(), total
+
+    def read(self, table_name: str, columns=None, filters=None, limit=None) -> pd.DataFrame:
+        sdf = self._filtered(table_name, filters)
         if columns:
             keep = [c for c in columns if c in sdf.columns]
             if keep:

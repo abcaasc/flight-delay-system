@@ -198,7 +198,7 @@ CREATE TABLE sys_job_run (
 	period VARCHAR(16) NOT NULL COMMENT 'yyyy-MM 或 yyyy；区间用逗号', 
 	mode VARCHAR(16) NOT NULL COMMENT 'full/incremental', 
 	engine VARCHAR(16) NOT NULL COMMENT 'spark/pandas', 
-	status VARCHAR(16) NOT NULL COMMENT 'queued/running/success/failed/blocked/cancelled', 
+	status VARCHAR(16) NOT NULL COMMENT 'queued/running/success/failed/blocked/cancelled/interrupted',
 	progress FLOAT NOT NULL COMMENT '0-100', 
 	current_file VARCHAR(256) NOT NULL, 
 	total_files INTEGER NOT NULL, 
@@ -222,6 +222,14 @@ CREATE INDEX ix_sys_job_run_status ON sys_job_run (status);
 CREATE INDEX ix_sys_job_run_job_name ON sys_job_run (job_name);
 CREATE INDEX ix_sys_job_run_dataset ON sys_job_run (dataset);
 CREATE INDEX ix_job_dataset_period ON sys_job_run (dataset, period);
+
+CREATE TABLE sys_job_lease (
+	job_id VARCHAR(48) NOT NULL,
+	heartbeat_at DATETIME NOT NULL,
+	request_json TEXT NOT NULL,
+	PRIMARY KEY (job_id)
+)
+  ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='sys_job_lease';
 
 CREATE TABLE sys_user (
 	id INTEGER NOT NULL AUTO_INCREMENT, 

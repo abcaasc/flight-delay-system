@@ -118,11 +118,12 @@ def actual_weather_window(airport: str, day: date, dep_minutes: int) -> dict | N
         values = values.where(np.isfinite(values)).dropna()
         return default if values.empty else float(getattr(values, operation)())
 
+    defaults = model_service.FORM_WEATHER_DEFAULTS
     return {
-        "vis_min_mi": aggregate("vis_mi", "min", 9.0),
-        "wind_max_ms": aggregate("wind_ms", "max", 0.0),
-        "tmp_mean_c": aggregate("temp_c", "mean", 15.0),
-        "precip_mm": aggregate("precip_mm", "sum", 0.0),
+        "vis_min_mi": aggregate("vis_mi", "min", defaults["vis_min_mi"]),
+        "wind_max_ms": aggregate("wind_ms", "max", defaults["wind_max_ms"]),
+        "tmp_mean_c": aggregate("temp_c", "mean", defaults["tmp_mean_c"]),
+        "precip_mm": aggregate("precip_mm", "sum", defaults["precip_mm"]),
         "weather_class": int(aggregate("weather_class", "max", 0)),
         "weather_available": 1,
     }
@@ -230,9 +231,18 @@ def predict_single(origin: str, dest: str, airline: str, flight_date: str,
     prob = float(result["prob"][0])
     contrib = result["contrib"].iloc[0]
     factors = model_service.top_factors(contrib, prob, k=top_k)
-    model_inputs = model_service._feature_frame(features).iloc[0]
+    inputs = result["inputs"].iloc[0]
+    feature_values = features.iloc[0].to_dict()
+    if result.get("feature_profile") == "form":
+        weather = "unused"
+        if result["form_weather"]:
+            weather = "observation" if inputs["weather_available"] else "missing"
+        meta.update(feature_profile="form", distance_source="great_circle",
+                    weather_source=weather, rate_source_period=None,
+                    note="表单模型使用日期、计划时刻和机场坐标。配置气象特征时读取起飞前观测。")
+        feature_values.update(inputs.to_dict())
     for factor in factors:
-        factor["feature_value"] = _safe(model_inputs[factor["feature"]])
+        factor["feature_value"] = _safe(inputs[factor["feature"]])
     threshold = result["threshold"]
     bias = float(result["base_logit"][0])
     baseline_prob = float(1 / (1 + math.exp(-bias)))
@@ -263,7 +273,7 @@ def predict_single(origin: str, dest: str, airline: str, flight_date: str,
         "engine": result["engine"],
         "model_ver": result["model_ver"],
         "features": {k: (None if isinstance(v, float) and math.isnan(v) else v)
-                     for k, v in features.iloc[0].to_dict().items()},
+                     for k, v in feature_values.items()},
         "meta": meta,
     }
 
@@ -283,8 +293,7 @@ def explain_flight(flight_sk: str, top_k: int = 10) -> dict:
     if df is None:
         raise ValueError(f"未找到航班 {flight_sk} 的特征记录")
 
-    features = model_service._feature_frame(df)
-    result = model_service.predict_frame(features)
+    result = model_service.predict_frame(df)
     prob = float(result["prob"][0])
     contrib = result["contrib"].iloc[0]
     factors = model_service.top_factors(contrib, prob, k=top_k)

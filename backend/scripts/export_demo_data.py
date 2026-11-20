@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -106,6 +107,8 @@ def export_full(src: Path, dst: Path) -> None:
 
 
 def export_sampled(src: Path, dst: Path, rows: int, seed: int) -> None:
+    manifest = dst / "_sampled_flight_months.json"
+    sampled = set(json.loads(manifest.read_text(encoding="utf-8"))) if manifest.is_file() else set()
     for layer, table, period, default_rows in SAMPLE_TABLES:
         part = src / layer / table / f"year_month={period}"
         if not part.is_dir():
@@ -114,12 +117,18 @@ def export_sampled(src: Path, dst: Path, rows: int, seed: int) -> None:
         need = rows if table == "dwd_flight_detail" else min(rows, default_rows)
         table_obj = _dataset(part).to_table()
         n = table_obj.num_rows
+        if table == "dwd_flight_detail":
+            sampled.discard(period)
+            if n > need:
+                sampled.add(period)
         if n > need:
             rng = np.random.default_rng(seed)
             idx = np.sort(rng.choice(n, size=need, replace=False))
             table_obj = table_obj.take(idx)
         size = _write_one(table_obj, dst / layer / table / f"year_month={period}")
         print(f"  [OK] {layer}/{table:<22} {period}  {table_obj.num_rows:>7,} 行  {size / 1e6:6.1f} MB")
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps(sorted(sampled)) + "\n", encoding="utf-8")
 
 
 def copy_models(src: Path, dst: Path) -> None:

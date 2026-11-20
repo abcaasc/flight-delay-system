@@ -54,6 +54,8 @@ class Config:
     WAREHOUSE_ROOT = _path("WAREHOUSE_ROOT", "data/warehouse")
     STAGING_ROOT = _path("STAGING_ROOT", "data/staging")
     MODEL_ROOT = _path("MODEL_ROOT", "data/models")
+    ROLLING_BACKTEST_REPORT = _path("ROLLING_BACKTEST_REPORT", "instance/rolling-backtest.json")
+    FORM_MODEL_REPORT = _path("FORM_MODEL_REPORT", "instance/form-model-validation.json")
 
     # ---------------- 前端静态资源（单容器部署时由后端托管）----------------
     # 指向 frontend 的构建产物（dist）；文件存在时 `/` 直接返回 Vue 应用，

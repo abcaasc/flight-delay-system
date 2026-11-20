@@ -23,6 +23,7 @@ from app.etl import dws as dws_etl
 from app.etl import ods as ods_etl
 from app.services import datasource, engine, model as model_service
 from app.services.cache import invalidate
+from app.services.job_runtime import JobHeartbeat, reconcile_jobs
 from app.utils.logger import get_logger
 from app.utils.response import ApiError, ErrCode
 
@@ -202,8 +203,11 @@ def create_job(job_type: str, dataset: str, periods: list[str] | None = None,
                  period=",".join(resolved), mode=mode, engine=engine.get_engine().name,
                  status="queued", operator=operator,
                  started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    heartbeat = JobHeartbeat(job_id)
     try:
         db.session.add(row)
+        heartbeat.register({"job_type": job_type, "dataset": dataset, "periods": resolved,
+                            "mode": mode, "params": params})
         db.session.commit()
     except Exception:
         db.session.rollback()
@@ -248,6 +252,7 @@ def create_job(job_type: str, dataset: str, periods: list[str] | None = None,
             except Exception:
                 db.session.rollback()
         finally:
+            heartbeat.stop()
             db.session.remove()
             _release(dataset)
             _THREADS.pop(job_id, None)
@@ -256,8 +261,10 @@ def create_job(job_type: str, dataset: str, periods: list[str] | None = None,
         thread = threading.Thread(target=_target, name=f"job-{job_id}", daemon=True)
         _THREADS[job_id] = thread
         try:
+            heartbeat.start()
             thread.start()
         except Exception:
+            heartbeat.stop()
             _THREADS.pop(job_id, None)
             _release(dataset)
             row.status = "failed"
@@ -267,6 +274,7 @@ def create_job(job_type: str, dataset: str, periods: list[str] | None = None,
             raise
         preview["queued"] = True
         return preview
+    heartbeat.start()
     _target()
     preview["queued"] = False
     return preview
@@ -274,12 +282,15 @@ def create_job(job_type: str, dataset: str, periods: list[str] | None = None,
 
 def job_status(job_id: str) -> dict:
     from app.extensions import db
-    from app.models import JobRun
+    from app.models import JobLease, JobRun
 
+    reconcile_jobs()
     row = db.session.query(JobRun).filter_by(job_id=job_id).first()
     if row is None:
         raise ApiError(ErrCode.NOT_FOUND, f"作业不存在：{job_id}")
     data = row.to_dict()
+    lease = db.session.get(JobLease, job_id)
+    data["retryable"] = bool(row.status == "interrupted" and lease and lease.request_json)
     data["running_thread"] = job_id in _THREADS
     return data
 
@@ -287,9 +298,10 @@ def job_status(job_id: str) -> dict:
 def job_list(limit: int = 20, dataset: str | None = None, status: str | None = None,
              period: str | None = None) -> list[dict]:
     from app.extensions import db
-    from app.models import JobRun
+    from app.models import JobLease, JobRun
 
-    query = db.session.query(JobRun)
+    reconcile_jobs()
+    query = db.session.query(JobRun, JobLease.request_json).outerjoin(JobLease, JobLease.job_id == JobRun.job_id)
     if dataset:
         query = query.filter(JobRun.dataset == dataset)
     if status:
@@ -297,7 +309,18 @@ def job_list(limit: int = 20, dataset: str | None = None, status: str | None = N
     if period:
         query = query.filter(JobRun.period.contains(period, autoescape=True))
     rows = query.order_by(JobRun.id.desc()).limit(limit).all()
-    return [r.to_dict() for r in rows]
+    return [{**row.to_dict(), "retryable": bool(row.status == "interrupted" and request)}
+            for row, request in rows]
+
+
+def retry_job(job_id: str, operator: str) -> dict:
+    from app.extensions import db
+    from app.models import JobLease
+
+    if not job_status(job_id)["retryable"]:
+        raise ApiError(ErrCode.PARAM_INVALID, "仅能重试已保存提交参数的中断作业")
+    lease = db.session.get(JobLease, job_id)
+    return create_job(operator=operator, **json.loads(lease.request_json))
 
 
 def job_stats(days: int = 30) -> dict:
@@ -305,6 +328,7 @@ def job_stats(days: int = 30) -> dict:
     from app.extensions import db
     from app.models import JobRun
 
+    reconcile_jobs()
     rows = (db.session.query(JobRun).order_by(JobRun.id.desc()).limit(500).all())
     by_name: dict[str, dict] = {}
     for row in rows:
@@ -315,7 +339,7 @@ def job_stats(days: int = 30) -> dict:
         item["runs"] += 1
         if row.status == "success":
             item["success"] += 1
-        elif row.status in ("failed", "blocked"):
+        elif row.status in ("failed", "blocked", "interrupted"):
             item["failed"] += 1
         if row.elapsed_sec:
             item["elapsed"].append(row.elapsed_sec)
